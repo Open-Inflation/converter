@@ -62,13 +62,23 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(
-                    "SELECT canonical_product_id, parser_name, source_id, category_normalized, geo_normalized, composition_normalized FROM catalog_products ORDER BY id ASC"
+                    """
+                    SELECT
+                        canonical_product_id,
+                        parser_name,
+                        source_id,
+                        primary_category_id,
+                        settlement_id,
+                        composition_normalized
+                    FROM catalog_products
+                    ORDER BY id ASC
+                    """
                 ).fetchall()
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(rows[0]["canonical_product_id"], rows[1]["canonical_product_id"])
-                self.assertEqual(rows[1]["category_normalized"], "продукты")
-                self.assertEqual(rows[1]["geo_normalized"], "санкт-петербург")
                 self.assertEqual(rows[1]["composition_normalized"], "сахар, какао, молоко")
+                self.assertIsNotNone(rows[0]["primary_category_id"])
+                self.assertIsNotNone(rows[0]["settlement_id"])
 
                 identity = conn.execute(
                     "SELECT canonical_product_id FROM catalog_identity_map WHERE parser_name = ? AND identity_type = ? AND identity_value = ?",
@@ -309,7 +319,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 row = conn.execute(
                     """
-                    SELECT brand, category_normalized, geo_normalized, composition_normalized, image_urls_json
+                    SELECT brand, primary_category_id, settlement_id, composition_normalized, image_urls_json
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -317,8 +327,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(row)
                 self.assertEqual(row["brand"], "O'Kitchen")
-                self.assertEqual(row["category_normalized"], "посуда")
-                self.assertEqual(row["geo_normalized"], "rus, москва")
+                self.assertIsNotNone(row["primary_category_id"])
+                self.assertIsNotNone(row["settlement_id"])
                 self.assertEqual(row["composition_normalized"], "сталь")
                 self.assertEqual(json.loads(row["image_urls_json"]), ["https://cdn.example/spoons.jpg"])
             finally:

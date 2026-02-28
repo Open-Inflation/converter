@@ -16,7 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
-    func,
+    inspect,
     select,
 )
 from sqlalchemy.engine import Engine
@@ -88,11 +88,8 @@ class _CatalogProduct(_CatalogBase):
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    category_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
-    category_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    geo_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
-    geo_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
+    primary_category_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     composition_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -304,6 +301,7 @@ class CatalogRepository:
             expire_on_commit=False,
         )
         _CatalogBase.metadata.create_all(self._engine)
+        self._validate_catalog_products_schema()
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
@@ -325,7 +323,12 @@ class CatalogRepository:
                 self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
 
                 self._upsert_product_source(session, record, snapshot=snapshot)
-                self._upsert_product_row(session, record)
+                self._upsert_product_row(
+                    session,
+                    record,
+                    settlement=settlement,
+                    categories=categories,
+                )
 
             session.commit()
 
@@ -952,9 +955,18 @@ class CatalogRepository:
             return f"{parser_name}:title:{digest}"
         return None
 
-    def _upsert_product_row(self, session: Session, record: NormalizedProductRecord) -> None:
+    def _upsert_product_row(
+        self,
+        session: Session,
+        record: NormalizedProductRecord,
+        *,
+        settlement: _CatalogSettlement | None,
+        categories: list[tuple[_CatalogCategory, int]],
+    ) -> None:
         now = _utc_now()
         source_id = self._source_id(record)
+        primary_category_id = self._primary_category_id(categories)
+        settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
 
         existing = session.scalar(
             select(_CatalogProduct).where(
@@ -982,10 +994,8 @@ class CatalogRepository:
                 available_count=record.available_count,
                 package_quantity=record.package_quantity,
                 package_unit=record.package_unit,
-                category_raw=record.category_raw,
-                category_normalized=record.category_normalized,
-                geo_raw=record.geo_raw,
-                geo_normalized=record.geo_normalized,
+                primary_category_id=primary_category_id,
+                settlement_id=settlement_id,
                 composition_raw=record.composition_raw,
                 composition_normalized=record.composition_normalized,
                 image_urls_json=list(record.image_urls),
@@ -1024,15 +1034,10 @@ class CatalogRepository:
         if not _is_missing(record.package_unit):
             existing.package_unit = record.package_unit
 
-        if not _is_missing(record.category_raw):
-            existing.category_raw = record.category_raw
-        if not _is_missing(record.category_normalized):
-            existing.category_normalized = record.category_normalized
-
-        if not _is_missing(record.geo_raw):
-            existing.geo_raw = record.geo_raw
-        if not _is_missing(record.geo_normalized):
-            existing.geo_normalized = record.geo_normalized
+        if primary_category_id is not None:
+            existing.primary_category_id = primary_category_id
+        if settlement_id is not None:
+            existing.settlement_id = settlement_id
 
         if not _is_missing(record.composition_raw):
             existing.composition_raw = record.composition_raw
@@ -1046,6 +1051,13 @@ class CatalogRepository:
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
         existing.raw_payload_json = self._merge_payload(existing.raw_payload_json, record.raw_payload)
+
+    @staticmethod
+    def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
+        for category, _ in categories:
+            if category.id is not None:
+                return int(category.id)
+        return None
 
     @staticmethod
     def _fill_missing(target: Any, field_name: str, value: object) -> None:
@@ -1117,6 +1129,20 @@ class CatalogRepository:
             return int(token)
         except ValueError:
             return None
+
+    def _validate_catalog_products_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_products"):
+            return
+
+        columns = {item["name"] for item in inspector.get_columns("catalog_products")}
+        required = ("primary_category_id", "settlement_id")
+        missing = [name for name in required if name not in columns]
+        if missing:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_products`: missing columns "
+                f"{', '.join(missing)}. Apply DB migrations before starting converter."
+            )
 
 
 class CatalogSQLiteRepository(CatalogRepository):
