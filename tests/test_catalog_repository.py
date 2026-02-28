@@ -26,6 +26,36 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         tmp.close()
         return Path(tmp.name)
 
+    def test_schema_does_not_include_legacy_title_columns(self) -> None:
+        db_path = self._make_db()
+        try:
+            CatalogSQLiteRepository(db_path)
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                product_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_products)").fetchall()
+                }
+                snapshot_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
+                }
+
+                self.assertIn("title_original", product_columns)
+                self.assertIn("title_normalized_no_stopwords", product_columns)
+                self.assertNotIn("title_normalized", product_columns)
+                self.assertNotIn("title_original_no_stopwords", product_columns)
+
+                self.assertIn("title_original", snapshot_columns)
+                self.assertIn("title_normalized_no_stopwords", snapshot_columns)
+                self.assertNotIn("title_normalized", snapshot_columns)
+                self.assertNotIn("title_original_no_stopwords", snapshot_columns)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_upsert_persists_identity_backfill_and_images(self) -> None:
         db_path = self._make_db()
         try:

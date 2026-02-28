@@ -77,8 +77,6 @@ class _CatalogProduct(_CatalogBase):
     sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     title_original: Mapped[str] = mapped_column(Text, nullable=False)
-    title_normalized: Mapped[str] = mapped_column(Text, nullable=False)
-    title_original_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
     title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -118,8 +116,6 @@ class _CatalogProductSnapshot(_CatalogBase):
     receiver_sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     title_original: Mapped[str] = mapped_column(Text, nullable=False)
-    title_normalized: Mapped[str] = mapped_column(Text, nullable=False)
-    title_original_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
     title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -615,8 +611,6 @@ class CatalogRepository:
             receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
             receiver_sort_order=self._to_int(payload.get("receiver_sort_order")),
             title_original=record.title_original,
-            title_normalized=record.title_normalized,
-            title_original_no_stopwords=record.title_original_no_stopwords,
             title_normalized_no_stopwords=record.title_normalized_no_stopwords,
             brand=record.brand,
             unit=record.unit,
@@ -1002,8 +996,6 @@ class CatalogRepository:
                 plu=record.plu,
                 sku=record.sku,
                 title_original=record.title_original,
-                title_normalized=record.title_normalized,
-                title_original_no_stopwords=record.title_original_no_stopwords,
                 title_normalized_no_stopwords=record.title_normalized_no_stopwords,
                 brand=record.brand,
                 unit=record.unit,
@@ -1032,8 +1024,6 @@ class CatalogRepository:
 
         # title fields are authoritative per source snapshot
         existing.title_original = record.title_original
-        existing.title_normalized = record.title_normalized
-        existing.title_original_no_stopwords = record.title_original_no_stopwords
         existing.title_normalized_no_stopwords = record.title_normalized_no_stopwords
 
         if not _is_missing(record.brand):

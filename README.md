@@ -53,6 +53,10 @@ converter/
 - `catalog_product_category_links` - связи snapshot -> category.
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
 
+Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
+`title_normalized` и `title_original_no_stopwords` в `catalog_products` и
+`catalog_product_snapshots` не сохраняются.
+
 Политика обновления:
 
 - история не удаляется и не перезаписывается (`append-only snapshots`);
