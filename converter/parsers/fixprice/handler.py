@@ -4,6 +4,7 @@ import re
 
 from converter.core.base import BaseParserHandler
 from converter.core.models import TitleNormalizationResult
+from converter.parsers.category_normalization import normalize_category_text
 
 from .normalizers import RussianTextNormalizer
 from .title_parser import FixPriceTitleParser
@@ -16,6 +17,7 @@ class FixPriceHandler(BaseParserHandler):
 
     def __init__(self, text_normalizer: RussianTextNormalizer | None = None) -> None:
         normalizer = text_normalizer or RussianTextNormalizer()
+        self._text_normalizer = normalizer
         self._title_parser = FixPriceTitleParser(text_normalizer=normalizer)
 
     def normalize_title(self, title: str) -> TitleNormalizationResult:
@@ -26,22 +28,7 @@ class FixPriceHandler(BaseParserHandler):
         if normalized is None:
             return None
 
-        category_map = {
-            "напитки и соки": "напитки",
-            "канцтовары": "канцелярия",
-            "бытовая химия и уборка": "бытовая химия",
-        }
-        return category_map.get(normalized, normalized)
-
-    def normalize_geo(self, geo: str | None) -> str | None:
-        normalized = super().normalize_geo(geo)
-        if normalized is None:
-            return None
-
-        if normalized == "российская федерация":
-            return "россия"
-
-        return normalized
+        return normalize_category_text(normalized, text_normalizer=self._text_normalizer)
 
     def normalize_composition(self, composition: str | None) -> str | None:
         normalized = super().normalize_composition(composition)

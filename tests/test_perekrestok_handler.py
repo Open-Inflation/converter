@@ -49,6 +49,11 @@ class PerekrestokHandlerTests(unittest.TestCase):
         self.assertIsNone(result.package_quantity)
         self.assertIsNone(result.package_unit)
 
+    def test_category_normalization_removes_separators_and_stopwords(self) -> None:
+        result = self.handler.normalize_category("напитки и соки")
+
+        self.assertEqual(result, "напиток сок")
+
 
 class PerekrestokPipelineIntegrationTests(unittest.TestCase):
     def test_default_pipeline_resolves_perekrestok_handler(self) -> None:
@@ -70,4 +75,3 @@ class PerekrestokPipelineIntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

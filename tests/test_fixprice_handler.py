@@ -30,6 +30,21 @@ class FixPriceHandlerTests(unittest.TestCase):
         self.assertEqual(result.package_unit, "KGM")
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.2)
 
+    def test_category_normalization_removes_separators_and_lemmatizes(self) -> None:
+        result = self.handler.normalize_category("молочные продукты, яйца")
+
+        self.assertEqual(result, "молочный продукт яйцо")
+
+    def test_category_normalization_removes_stopwords(self) -> None:
+        result = self.handler.normalize_category("напитки и соки")
+
+        self.assertEqual(result, "напиток сок")
+
+    def test_geo_normalization_has_no_manual_remap(self) -> None:
+        result = self.handler.normalize_geo("Российская Федерация")
+
+        self.assertEqual(result, "российская федерация")
+
 
 class PipelineBackfillTests(unittest.TestCase):
     def test_pipeline_backfills_missing_fields_from_previous_version(self) -> None:
@@ -58,7 +73,7 @@ class PipelineBackfillTests(unittest.TestCase):
         second = pipeline.process_one(newer)
 
         self.assertEqual(first.canonical_product_id, second.canonical_product_id)
-        self.assertEqual(second.category_normalized, "продукты")
+        self.assertEqual(second.category_normalized, "продукт")
         self.assertEqual(second.geo_normalized, "санкт-петербург")
         self.assertEqual(second.composition_normalized, "сахар, какао, молоко")
 

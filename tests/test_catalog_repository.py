@@ -63,7 +63,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
             self.assertIsNotNone(first_norm.canonical_product_id)
             self.assertEqual(first_norm.canonical_product_id, second_norm.canonical_product_id)
-            self.assertEqual(second_norm.category_normalized, "продукты")
+            self.assertEqual(second_norm.category_normalized, "продукт")
             self.assertEqual(second_norm.geo_normalized, "санкт-петербург")
             self.assertEqual(second_norm.composition_normalized, "сахар, какао, молоко")
 

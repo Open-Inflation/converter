@@ -46,6 +46,11 @@ class ChizhikHandlerTests(unittest.TestCase):
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.93)
         self.assertEqual(result.package_unit, "LTR")
 
+    def test_category_normalization_removes_separators_and_stopwords(self) -> None:
+        result = self.handler.normalize_category("напитки и соки")
+
+        self.assertEqual(result, "напиток сок")
+
 
 class ChizhikPipelineIntegrationTests(unittest.TestCase):
     def test_default_pipeline_resolves_chizhik_handler(self) -> None:
