@@ -1,0 +1,5 @@
+sqlalchemy
+pymysql
+pymorphy3
+razdel
+stop-words

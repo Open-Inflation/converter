@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
+
+from sqlalchemy import JSON, DateTime, String, Text, create_engine, func, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from converter.core.models import NormalizedProductRecord
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+def _utc_now() -> datetime:
+    return datetime.now(tz=timezone.utc)
 
 
 def _safe_str(value: object) -> str | None:
@@ -29,15 +33,86 @@ def _is_missing(value: object) -> bool:
     return False
 
 
-class CatalogSQLiteRepository:
-    """
-    Persistent sink for normalized catalog products.
+class _CatalogBase(DeclarativeBase):
+    pass
 
-    Stores:
-    - normalized product rows;
-    - canonical product id mapping;
-    - persistent image fingerprint map;
-    - receiver sync cursor.
+
+class _CatalogProduct(_CatalogBase):
+    __tablename__ = "catalog_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    plu: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    raw_title: Mapped[str] = mapped_column(Text, nullable=False)
+    title_original: Mapped[str] = mapped_column(Text, nullable=False)
+    title_normalized: Mapped[str] = mapped_column(Text, nullable=False)
+    title_original_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
+    title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
+
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    available_count: Mapped[float | None] = mapped_column(nullable=True)
+    package_quantity: Mapped[float | None] = mapped_column(nullable=True)
+    package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    category_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    geo_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    geo_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    composition_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    duplicate_image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    raw_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class _CatalogIdentityMap(_CatalogBase):
+    __tablename__ = "catalog_identity_map"
+
+    parser_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_type: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity_value: Mapped[str] = mapped_column(String(255), primary_key=True)
+
+    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class _CatalogImageFingerprint(_CatalogBase):
+    __tablename__ = "catalog_image_fingerprints"
+
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class _ConverterSyncState(_CatalogBase):
+    __tablename__ = "converter_sync_state"
+
+    state_key: Mapped[str] = mapped_column("key", String(191), primary_key=True)
+    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CatalogRepository:
+    """
+    SQLAlchemy-based persistent sink for normalized catalog products.
     """
 
     BACKFILL_FIELDS = (
@@ -49,63 +124,55 @@ class CatalogSQLiteRepository:
         "package_unit",
     )
 
-    def __init__(self, db_path: str | Path) -> None:
-        self._db_path = Path(db_path)
-        if self._db_path.parent and not self._db_path.parent.exists():
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+    def __init__(self, database_url: str, *, engine: Engine | None = None) -> None:
+        self._database_url = database_url
+        self._engine = engine or self._create_engine(database_url)
+        self._session_factory = sessionmaker(
+            bind=self._engine,
+            class_=Session,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
+        _CatalogBase.metadata.create_all(self._engine)
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
             return
 
-        conn = self._connect()
-        try:
-            conn.execute("BEGIN")
+        with self._session_factory() as session:
             for record in records:
-                canonical_product_id = self._resolve_canonical_product_id(conn, record)
+                canonical_product_id = self._resolve_canonical_product_id(session, record)
                 record.canonical_product_id = canonical_product_id
 
-                self._apply_persistent_image_dedup(conn, record)
-                self._apply_backfill(conn, record)
-                self._upsert_product_row(conn, record)
+                self._apply_persistent_image_dedup(session, record)
+                self._apply_backfill(session, record)
+                self._upsert_product_row(session, record)
 
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            session.commit()
 
     def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
-        conn = self._connect()
-        try:
+        with self._session_factory() as session:
             key = self._cursor_key(parser_name)
-            row = conn.execute(
-                "SELECT value FROM converter_sync_state WHERE key = ?",
-                [key],
-            ).fetchone()
+            row = session.get(_ConverterSyncState, key)
             if row is None:
                 return None, None
 
-            raw_value = _safe_str(row["value"])
-            if raw_value is None:
-                return None, None
-
-            try:
-                parsed = json.loads(raw_value)
-            except json.JSONDecodeError:
-                return None, None
-
-            if not isinstance(parsed, dict):
+            raw_value = row.value
+            if isinstance(raw_value, str):
+                try:
+                    parsed = json.loads(raw_value)
+                except json.JSONDecodeError:
+                    return None, None
+            elif isinstance(raw_value, dict):
+                parsed = raw_value
+            else:
                 return None, None
 
             ingested_at = _safe_str(parsed.get("ingested_at"))
             product_id_raw = parsed.get("product_id")
             product_id = int(product_id_raw) if isinstance(product_id_raw, int) or str(product_id_raw).isdigit() else None
             return ingested_at, product_id
-        finally:
-            conn.close()
 
     def set_receiver_cursor(
         self,
@@ -114,62 +181,56 @@ class CatalogSQLiteRepository:
         ingested_at: str,
         product_id: int,
     ) -> None:
-        payload = json.dumps(
-            {
-                "ingested_at": ingested_at,
-                "product_id": int(product_id),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        now = _utc_now_iso()
-        conn = self._connect()
-        try:
-            conn.execute(
-                """
-                INSERT INTO converter_sync_state(key, value, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    updated_at = excluded.updated_at
-                """,
-                [self._cursor_key(parser_name), payload, now],
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        payload = {
+            "ingested_at": ingested_at,
+            "product_id": int(product_id),
+        }
+        now = _utc_now()
 
-    def _resolve_canonical_product_id(self, conn: sqlite3.Connection, record: NormalizedProductRecord) -> str:
+        with self._session_factory() as session:
+            key = self._cursor_key(parser_name)
+            row = session.get(_ConverterSyncState, key)
+            if row is None:
+                row = _ConverterSyncState(
+                    state_key=key,
+                    value=payload,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                row.value = payload
+                row.updated_at = now
+            session.commit()
+
+    @staticmethod
+    def _create_engine(database_url: str) -> Engine:
+        connect_args: dict[str, object] = {}
+        if database_url.startswith("sqlite"):
+            connect_args["check_same_thread"] = False
+
+        return create_engine(
+            database_url,
+            future=True,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
+
+    def _resolve_canonical_product_id(self, session: Session, record: NormalizedProductRecord) -> str:
         parser_name = record.parser_name.strip().lower()
         identity_keys = record.identity_candidates()
 
         chosen_id: str | None = None
-
         for identity_type, identity_value in identity_keys:
-            row = conn.execute(
-                """
-                SELECT canonical_product_id
-                FROM catalog_identity_map
-                WHERE parser_name = ? AND identity_type = ? AND identity_value = ?
-                """,
-                [parser_name, identity_type, identity_value],
-            ).fetchone()
-            if row is not None and _safe_str(row["canonical_product_id"]):
-                chosen_id = str(row["canonical_product_id"])
+            row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+            if row is not None and _safe_str(row.canonical_product_id):
+                chosen_id = row.canonical_product_id
                 break
 
         fallback_identity = self._fallback_identity_value(record)
         if chosen_id is None and fallback_identity is not None:
-            row = conn.execute(
-                """
-                SELECT canonical_product_id
-                FROM catalog_identity_map
-                WHERE parser_name = ? AND identity_type = 'normalized_name' AND identity_value = ?
-                """,
-                [parser_name, fallback_identity],
-            ).fetchone()
-            if row is not None and _safe_str(row["canonical_product_id"]):
-                chosen_id = str(row["canonical_product_id"])
+            row = session.get(_CatalogIdentityMap, (parser_name, "normalized_name", fallback_identity))
+            if row is not None and _safe_str(row.canonical_product_id):
+                chosen_id = row.canonical_product_id
 
         if chosen_id is None:
             chosen_id = str(uuid4())
@@ -178,24 +239,21 @@ class CatalogSQLiteRepository:
         if fallback_identity is not None:
             identity_values.append(("normalized_name", fallback_identity))
 
-        now = _utc_now_iso()
+        now = _utc_now()
         for identity_type, identity_value in identity_values:
-            conn.execute(
-                """
-                INSERT INTO catalog_identity_map(
-                    parser_name,
-                    identity_type,
-                    identity_value,
-                    canonical_product_id,
-                    updated_at
+            row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+            if row is None:
+                row = _CatalogIdentityMap(
+                    parser_name=parser_name,
+                    identity_type=identity_type,
+                    identity_value=identity_value,
+                    canonical_product_id=chosen_id,
+                    updated_at=now,
                 )
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(parser_name, identity_type, identity_value) DO UPDATE SET
-                    canonical_product_id = excluded.canonical_product_id,
-                    updated_at = excluded.updated_at
-                """,
-                [parser_name, identity_type, identity_value, chosen_id, now],
-            )
+                session.add(row)
+            else:
+                row.canonical_product_id = chosen_id
+                row.updated_at = now
 
         return chosen_id
 
@@ -206,13 +264,13 @@ class CatalogSQLiteRepository:
             return fallback
         return _safe_str(record.title_normalized)
 
-    def _apply_persistent_image_dedup(self, conn: sqlite3.Connection, record: NormalizedProductRecord) -> None:
+    def _apply_persistent_image_dedup(self, session: Session, record: NormalizedProductRecord) -> None:
         unique_urls: list[str] = []
         duplicate_urls: list[str] = []
         fingerprints: list[str] = []
 
         seen_in_record: set[str] = set()
-        now = _utc_now_iso()
+        now = _utc_now()
 
         for raw_url in record.image_urls:
             url = raw_url.strip()
@@ -220,30 +278,20 @@ class CatalogSQLiteRepository:
                 continue
 
             fingerprint = hashlib.sha256(url.encode("utf-8")).hexdigest()
-            row = conn.execute(
-                "SELECT canonical_url FROM catalog_image_fingerprints WHERE fingerprint = ?",
-                [fingerprint],
-            ).fetchone()
+            row = session.get(_CatalogImageFingerprint, fingerprint)
 
             if row is None:
                 canonical_url = url
-                conn.execute(
-                    """
-                    INSERT INTO catalog_image_fingerprints(fingerprint, canonical_url, created_at, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    [fingerprint, canonical_url, now, now],
+                row = _CatalogImageFingerprint(
+                    fingerprint=fingerprint,
+                    canonical_url=canonical_url,
+                    created_at=now,
+                    updated_at=now,
                 )
+                session.add(row)
             else:
-                canonical_url = str(row["canonical_url"])
-                conn.execute(
-                    """
-                    UPDATE catalog_image_fingerprints
-                    SET updated_at = ?
-                    WHERE fingerprint = ?
-                    """,
-                    [now, fingerprint],
-                )
+                canonical_url = row.canonical_url
+                row.updated_at = now
                 if canonical_url != url:
                     duplicate_urls.append(url)
 
@@ -259,119 +307,120 @@ class CatalogSQLiteRepository:
         record.duplicate_image_urls = duplicate_urls
         record.image_fingerprints = fingerprints
 
-    def _apply_backfill(self, conn: sqlite3.Connection, record: NormalizedProductRecord) -> None:
+    def _apply_backfill(self, session: Session, record: NormalizedProductRecord) -> None:
         canonical_product_id = _safe_str(record.canonical_product_id)
         if canonical_product_id is None:
             return
 
-        observed_at = self._observed_at_iso(record)
+        history = session.scalars(
+            select(_CatalogProduct).where(_CatalogProduct.canonical_product_id == canonical_product_id)
+        ).all()
+        if not history:
+            return
+
+        target_time = self._to_utc(record.observed_at)
+
         for field_name in self.BACKFILL_FIELDS:
             current_value = getattr(record, field_name)
             if not _is_missing(current_value):
                 continue
 
-            replacement = self._lookup_backfill_value(
-                conn,
-                canonical_product_id=canonical_product_id,
-                field_name=field_name,
-                observed_at=observed_at,
-            )
+            replacement = self._closest_non_missing(history, field_name, target_time)
             if replacement is not None:
                 setattr(record, field_name, replacement)
 
-    def _lookup_backfill_value(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        canonical_product_id: str,
+    @staticmethod
+    def _closest_non_missing(
+        history: list[_CatalogProduct],
         field_name: str,
-        observed_at: str,
+        target_time: datetime,
     ) -> object | None:
-        if field_name not in self.BACKFILL_FIELDS:
-            return None
+        nearest_value: object | None = None
+        nearest_delta: float | None = None
 
-        if field_name in {"package_quantity"}:
-            condition = f"{field_name} IS NOT NULL"
-        else:
-            condition = f"{field_name} IS NOT NULL"
-            if field_name in {"brand", "category_normalized", "geo_normalized", "composition_normalized", "package_unit"}:
-                condition += f" AND TRIM({field_name}) <> ''"
+        for item in history:
+            value = getattr(item, field_name)
+            if _is_missing(value):
+                continue
 
-        query = f"""
-            SELECT {field_name} AS value
-            FROM catalog_products
-            WHERE canonical_product_id = ? AND {condition}
-            ORDER BY ABS(julianday(observed_at) - julianday(?)) ASC
-            LIMIT 1
-        """
+            observed = CatalogRepository._to_utc(item.observed_at)
+            delta = abs((observed - target_time).total_seconds())
+            if nearest_delta is None or delta < nearest_delta:
+                nearest_delta = delta
+                nearest_value = value
 
-        row = conn.execute(query, [canonical_product_id, observed_at]).fetchone()
-        if row is None:
-            return None
-        return row["value"]
+        return nearest_value
 
-    def _upsert_product_row(self, conn: sqlite3.Connection, record: NormalizedProductRecord) -> None:
-        now = _utc_now_iso()
+    def _upsert_product_row(self, session: Session, record: NormalizedProductRecord) -> None:
+        now = _utc_now()
         source_id = self._source_id(record)
 
-        payload = {
-            "canonical_product_id": record.canonical_product_id,
-            "parser_name": record.parser_name,
-            "source_id": source_id,
-            "plu": record.plu,
-            "sku": record.sku,
-            "raw_title": record.raw_title,
-            "title_original": record.title_original,
-            "title_normalized": record.title_normalized,
-            "title_original_no_stopwords": record.title_original_no_stopwords,
-            "title_normalized_no_stopwords": record.title_normalized_no_stopwords,
-            "brand": record.brand,
-            "unit": record.unit,
-            "available_count": record.available_count,
-            "package_quantity": record.package_quantity,
-            "package_unit": record.package_unit,
-            "category_raw": record.category_raw,
-            "category_normalized": record.category_normalized,
-            "geo_raw": record.geo_raw,
-            "geo_normalized": record.geo_normalized,
-            "composition_raw": record.composition_raw,
-            "composition_normalized": record.composition_normalized,
-            "image_urls_json": json.dumps(record.image_urls, ensure_ascii=False, separators=(",", ":")),
-            "duplicate_image_urls_json": json.dumps(record.duplicate_image_urls, ensure_ascii=False, separators=(",", ":")),
-            "image_fingerprints_json": json.dumps(record.image_fingerprints, ensure_ascii=False, separators=(",", ":")),
-            "observed_at": self._observed_at_iso(record),
-            "raw_payload_json": json.dumps(record.raw_payload, ensure_ascii=False, separators=(",", ":")),
-            "created_at": now,
-            "updated_at": now,
-        }
-
-        columns = ", ".join(payload.keys())
-        placeholders = ", ".join(["?"] * len(payload))
-        updates = ", ".join(
-            [
-                f"{key} = excluded.{key}"
-                for key in payload.keys()
-                if key not in {"created_at", "parser_name", "source_id"}
-            ]
+        existing = session.scalar(
+            select(_CatalogProduct).where(
+                _CatalogProduct.parser_name == record.parser_name,
+                _CatalogProduct.source_id == source_id,
+            )
         )
 
-        conn.execute(
-            f"""
-            INSERT INTO catalog_products({columns})
-            VALUES ({placeholders})
-            ON CONFLICT(parser_name, source_id) DO UPDATE SET
-                {updates},
-                updated_at = excluded.updated_at
-            """,
-            list(payload.values()),
-        )
+        if existing is None:
+            existing = _CatalogProduct(
+                parser_name=record.parser_name,
+                source_id=source_id,
+                created_at=now,
+                updated_at=now,
+                canonical_product_id=record.canonical_product_id or str(uuid4()),
+                plu=record.plu,
+                sku=record.sku,
+                raw_title=record.raw_title,
+                title_original=record.title_original,
+                title_normalized=record.title_normalized,
+                title_original_no_stopwords=record.title_original_no_stopwords,
+                title_normalized_no_stopwords=record.title_normalized_no_stopwords,
+                brand=record.brand,
+                unit=record.unit,
+                available_count=record.available_count,
+                package_quantity=record.package_quantity,
+                package_unit=record.package_unit,
+                category_raw=record.category_raw,
+                category_normalized=record.category_normalized,
+                geo_raw=record.geo_raw,
+                geo_normalized=record.geo_normalized,
+                composition_raw=record.composition_raw,
+                composition_normalized=record.composition_normalized,
+                image_urls_json=list(record.image_urls),
+                duplicate_image_urls_json=list(record.duplicate_image_urls),
+                image_fingerprints_json=list(record.image_fingerprints),
+                observed_at=self._to_utc(record.observed_at),
+                raw_payload_json=dict(record.raw_payload),
+            )
+            session.add(existing)
+            return
 
-    @staticmethod
-    def _observed_at_iso(record: NormalizedProductRecord) -> str:
-        dt = record.observed_at
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.isoformat()
+        existing.updated_at = now
+        existing.canonical_product_id = record.canonical_product_id or existing.canonical_product_id
+        existing.plu = record.plu
+        existing.sku = record.sku
+        existing.raw_title = record.raw_title
+        existing.title_original = record.title_original
+        existing.title_normalized = record.title_normalized
+        existing.title_original_no_stopwords = record.title_original_no_stopwords
+        existing.title_normalized_no_stopwords = record.title_normalized_no_stopwords
+        existing.brand = record.brand
+        existing.unit = record.unit
+        existing.available_count = record.available_count
+        existing.package_quantity = record.package_quantity
+        existing.package_unit = record.package_unit
+        existing.category_raw = record.category_raw
+        existing.category_normalized = record.category_normalized
+        existing.geo_raw = record.geo_raw
+        existing.geo_normalized = record.geo_normalized
+        existing.composition_raw = record.composition_raw
+        existing.composition_normalized = record.composition_normalized
+        existing.image_urls_json = list(record.image_urls)
+        existing.duplicate_image_urls_json = list(record.duplicate_image_urls)
+        existing.image_fingerprints_json = list(record.image_fingerprints)
+        existing.observed_at = self._to_utc(record.observed_at)
+        existing.raw_payload_json = dict(record.raw_payload)
 
     @staticmethod
     def _source_id(record: NormalizedProductRecord) -> str:
@@ -388,90 +437,22 @@ class CatalogSQLiteRepository:
             return f"plu:{plu}"
 
         canonical = _safe_str(record.canonical_product_id) or "unknown"
-        return f"generated:{canonical}:{CatalogSQLiteRepository._observed_at_iso(record)}"
+        return f"generated:{canonical}:{CatalogRepository._to_utc(record.observed_at).isoformat()}"
 
     @staticmethod
     def _cursor_key(parser_name: str) -> str:
         return f"receiver_cursor:{parser_name.strip().lower()}"
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @staticmethod
+    def _to_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
-    def _ensure_schema(self) -> None:
-        conn = self._connect()
-        try:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS catalog_products (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    canonical_product_id TEXT NOT NULL,
-                    parser_name TEXT NOT NULL,
-                    source_id TEXT NOT NULL,
-                    plu TEXT,
-                    sku TEXT,
-                    raw_title TEXT NOT NULL,
-                    title_original TEXT NOT NULL,
-                    title_normalized TEXT NOT NULL,
-                    title_original_no_stopwords TEXT NOT NULL,
-                    title_normalized_no_stopwords TEXT NOT NULL,
-                    brand TEXT,
-                    unit TEXT NOT NULL,
-                    available_count REAL,
-                    package_quantity REAL,
-                    package_unit TEXT,
-                    category_raw TEXT,
-                    category_normalized TEXT,
-                    geo_raw TEXT,
-                    geo_normalized TEXT,
-                    composition_raw TEXT,
-                    composition_normalized TEXT,
-                    image_urls_json TEXT NOT NULL,
-                    duplicate_image_urls_json TEXT NOT NULL,
-                    image_fingerprints_json TEXT NOT NULL,
-                    observed_at TEXT NOT NULL,
-                    raw_payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(parser_name, source_id)
-                );
 
-                CREATE INDEX IF NOT EXISTS ix_catalog_products_canonical_observed
-                ON catalog_products(canonical_product_id, observed_at);
-
-                CREATE INDEX IF NOT EXISTS ix_catalog_products_parser_plu
-                ON catalog_products(parser_name, plu);
-
-                CREATE INDEX IF NOT EXISTS ix_catalog_products_parser_sku
-                ON catalog_products(parser_name, sku);
-
-                CREATE TABLE IF NOT EXISTS catalog_identity_map (
-                    parser_name TEXT NOT NULL,
-                    identity_type TEXT NOT NULL,
-                    identity_value TEXT NOT NULL,
-                    canonical_product_id TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(parser_name, identity_type, identity_value)
-                );
-
-                CREATE INDEX IF NOT EXISTS ix_catalog_identity_map_canonical
-                ON catalog_identity_map(canonical_product_id);
-
-                CREATE TABLE IF NOT EXISTS catalog_image_fingerprints (
-                    fingerprint TEXT PRIMARY KEY,
-                    canonical_url TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS converter_sync_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
+class CatalogSQLiteRepository(CatalogRepository):
+    def __init__(self, db_path: str | Path) -> None:
+        path = Path(db_path)
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        super().__init__(f"sqlite:///{path.resolve()}")

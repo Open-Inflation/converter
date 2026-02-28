@@ -1,13 +1,81 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import JSON, String, Text, and_, func, inspect, or_, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
 from converter.core.models import PackageUnit, RawProductRecord, Unit
+
+
+class _ReceiverBase(DeclarativeBase):
+    pass
+
+
+class _RunArtifact(_ReceiverBase):
+    __tablename__ = "run_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    parser_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ingested_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class _RunArtifactProduct(_ReceiverBase):
+    __tablename__ = "run_artifact_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(nullable=False)
+
+    sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    plu: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    composition: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    available_count: Mapped[float | None] = mapped_column(nullable=True)
+    package_quantity: Mapped[float | None] = mapped_column(nullable=True)
+    package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    categories_uid_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    main_image: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
+
+
+class _RunArtifactCategory(_ReceiverBase):
+    __tablename__ = "run_artifact_categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(nullable=False)
+    uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class _RunArtifactAdministrativeUnit(_ReceiverBase):
+    __tablename__ = "run_artifact_administrative_units"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(nullable=False)
+
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class _RunArtifactProductImage(_ReceiverBase):
+    __tablename__ = "run_artifact_product_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(nullable=False)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
 
 
 def _safe_str(value: Any) -> str | None:
@@ -194,17 +262,44 @@ def map_receiver_row_to_raw_product(
     )
 
 
-class ReceiverSQLiteRepository:
-    """
-    Reader for receiver SQLite DB normalized tables.
+def _create_engine(database_url: str) -> Engine:
+    from sqlalchemy import create_engine
 
-    Requires receiver schema with `run_artifacts.parser_name`.
-    Legacy schema is intentionally unsupported.
+    connect_args: dict[str, object] = {}
+    if database_url.startswith("sqlite"):
+        connect_args["check_same_thread"] = False
+
+    return create_engine(
+        database_url,
+        future=True,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
+
+
+class ReceiverRepository:
+    """
+    SQLAlchemy-based reader for receiver DB normalized tables.
     """
 
-    def __init__(self, db_path: str | Path, *, default_parser_name: str = "fixprice") -> None:
-        self._db_path = Path(db_path)
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        default_parser_name: str = "fixprice",
+        engine: Engine | None = None,
+    ) -> None:
+        self._database_url = database_url
         self._default_parser_name = default_parser_name
+        self._engine = engine or _create_engine(database_url)
+        self._session_factory = sessionmaker(
+            bind=self._engine,
+            class_=Session,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+        )
+        self._validate_schema()
 
     def fetch_batch(
         self,
@@ -214,71 +309,81 @@ class ReceiverSQLiteRepository:
         after_ingested_at: str | datetime | None = None,
         after_product_id: int | None = None,
     ) -> list[RawProductRecord]:
-        if not self._db_path.is_file():
-            raise FileNotFoundError(f"receiver sqlite db not found: {self._db_path}")
+        parser_filter = parser_name.strip().lower() if isinstance(parser_name, str) else None
+        watermark = self._normalize_watermark(after_ingested_at)
+        after_id = int(after_product_id or 0)
 
-        conn = sqlite3.connect(self._db_path)
-        try:
-            conn.row_factory = sqlite3.Row
+        with self._session_factory() as session:
+            stmt = (
+                select(
+                    _RunArtifactProduct,
+                    _RunArtifact,
+                    _RunArtifactAdministrativeUnit,
+                )
+                .join(_RunArtifact, _RunArtifact.id == _RunArtifactProduct.artifact_id)
+                .outerjoin(
+                    _RunArtifactAdministrativeUnit,
+                    _RunArtifactAdministrativeUnit.artifact_id == _RunArtifact.id,
+                )
+            )
 
-            has_parser_name = self._has_column(conn, "run_artifacts", "parser_name")
-            if not has_parser_name:
-                raise RuntimeError(
-                    "Unsupported receiver schema: run_artifacts.parser_name is missing. "
-                    "Apply receiver manual migrations from 2026-02-26."
+            if parser_filter:
+                stmt = stmt.where(func.lower(_RunArtifact.parser_name) == parser_filter)
+
+            if watermark is not None:
+                stmt = stmt.where(
+                    or_(
+                        _RunArtifact.ingested_at > watermark,
+                        and_(
+                            _RunArtifact.ingested_at == watermark,
+                            _RunArtifactProduct.id > after_id,
+                        ),
+                    )
                 )
 
-            where_clauses: list[str] = []
-            params: list[object] = []
-            parser_filter = parser_name.strip().lower() if isinstance(parser_name, str) else None
-            if parser_filter:
-                where_clauses.append("LOWER(a.parser_name) = ?")
-                params.append(parser_filter)
-
-            watermark = self._normalize_watermark(after_ingested_at)
-            if watermark is not None:
-                where_clauses.append("(a.ingested_at > ? OR (a.ingested_at = ? AND p.id > ?))")
-                params.extend([watermark, watermark, int(after_product_id or 0)])
-
-            rows = conn.execute(
-                self._base_query(where_clauses),
-                [*params, max(1, int(limit))],
-            ).fetchall()
-
+            stmt = stmt.order_by(_RunArtifact.ingested_at.asc(), _RunArtifactProduct.id.asc()).limit(max(1, int(limit)))
+            rows = session.execute(stmt).all()
             if not rows:
                 return []
 
-            artifact_ids = sorted(
-                {
-                    int(row["artifact_id"])
-                    for row in rows
-                    if row["artifact_id"] is not None
-                }
-            )
-            product_ids = sorted(
-                {
-                    int(row["product_id"])
-                    for row in rows
-                    if row["product_id"] is not None
-                }
-            )
+            artifact_ids = sorted({product.artifact_id for product, _, _ in rows})
+            product_ids = sorted({product.id for product, _, _ in rows})
 
-            category_title_lookup = self._load_category_title_lookup(conn, artifact_ids)
-            image_lookup = self._load_image_lookup(conn, product_ids)
+            category_lookup = self._load_category_title_lookup(session, artifact_ids)
+            image_lookup = self._load_image_lookup(session, product_ids)
 
             out: list[RawProductRecord] = []
-            for row in rows:
-                row_data = dict(row)
+            for product, artifact, admin in rows:
+                row_data: dict[str, Any] = {
+                    "product_id": product.id,
+                    "artifact_id": product.artifact_id,
+                    "product_sku": product.sku,
+                    "product_plu": product.plu,
+                    "product_title": product.title,
+                    "product_composition": product.composition,
+                    "product_brand": product.brand,
+                    "product_unit": product.unit,
+                    "product_available_count": product.available_count,
+                    "product_package_quantity": product.package_quantity,
+                    "product_package_unit": product.package_unit,
+                    "category_uids_json": product.categories_uid_json,
+                    "product_main_image": product.main_image,
+                    "product_sort_order": product.sort_order,
+                    "run_id": artifact.run_id,
+                    "artifact_source": artifact.source,
+                    "ingested_at": artifact.ingested_at,
+                    "parser_name": artifact.parser_name,
+                    "geo_name": admin.name if admin else None,
+                    "geo_region": admin.region if admin else None,
+                    "geo_country": admin.country if admin else None,
+                }
 
-                row_category_uids = _as_string_list(row_data.get("category_uids_json"))
+                category_uids = _as_string_list(row_data.get("category_uids_json"))
                 row_data["category_titles"] = self._resolve_category_titles(
-                    row_category_uids,
-                    category_title_lookup.get(int(row_data["artifact_id"]), {}),
+                    category_uids,
+                    category_lookup.get(product.artifact_id, {}),
                 )
-
-                row_product_id = int(row_data["product_id"])
-                row_images = image_lookup.get(row_product_id, [])
-                row_data["image_urls_json"] = row_images
+                row_data["image_urls_json"] = image_lookup.get(product.id, [])
 
                 parsed = map_receiver_row_to_raw_product(
                     row_data,
@@ -286,125 +391,66 @@ class ReceiverSQLiteRepository:
                 )
                 if parser_filter and parsed.parser_name.strip().lower() != parser_filter:
                     continue
-
                 out.append(parsed)
 
             return out
-        finally:
-            conn.close()
 
-    @staticmethod
-    def _has_column(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return any(row[1] == column_name for row in rows)
+    def _validate_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("run_artifacts"):
+            raise RuntimeError("Receiver schema is missing table run_artifacts")
 
-    @staticmethod
-    def _normalize_watermark(value: str | datetime | None) -> str | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc).isoformat()
-            return value.isoformat()
-        token = _safe_str(value)
-        return token
+        columns = {item["name"] for item in inspector.get_columns("run_artifacts")}
+        if "parser_name" not in columns:
+            raise RuntimeError(
+                "Unsupported receiver schema: run_artifacts.parser_name is missing. "
+                "Apply receiver manual migrations from 2026-02-26."
+            )
 
-    @staticmethod
-    def _base_query(where_clauses: list[str]) -> str:
-        where_sql = ""
-        if where_clauses:
-            where_sql = "WHERE " + " AND ".join(where_clauses)
-        return f"""
-        SELECT
-            p.id AS product_id,
-            p.artifact_id AS artifact_id,
-            p.sku AS product_sku,
-            p.plu AS product_plu,
-            p.title AS product_title,
-            p.composition AS product_composition,
-            p.brand AS product_brand,
-            p.unit AS product_unit,
-            p.available_count AS product_available_count,
-            p.package_quantity AS product_package_quantity,
-            p.package_unit AS product_package_unit,
-            p.categories_uid_json AS category_uids_json,
-            p.main_image AS product_main_image,
-            p.sort_order AS product_sort_order,
-            a.run_id AS run_id,
-            a.source AS artifact_source,
-            a.ingested_at AS ingested_at,
-            a.parser_name AS parser_name,
-            au.name AS geo_name,
-            au.region AS geo_region,
-            au.country AS geo_country
-        FROM run_artifact_products AS p
-        JOIN run_artifacts AS a ON a.id = p.artifact_id
-        LEFT JOIN run_artifact_administrative_units AS au ON au.artifact_id = a.id
-        {where_sql}
-        ORDER BY a.ingested_at ASC, p.id ASC
-        LIMIT ?
-        """
-
-    @staticmethod
     def _load_category_title_lookup(
-        conn: sqlite3.Connection,
+        self,
+        session: Session,
         artifact_ids: list[int],
     ) -> dict[int, dict[str, str]]:
         if not artifact_ids:
             return {}
 
-        placeholders = ",".join(["?"] * len(artifact_ids))
-        rows = conn.execute(
-            f"""
-            SELECT artifact_id, uid, title
-            FROM run_artifact_categories
-            WHERE artifact_id IN ({placeholders})
-            """,
-            artifact_ids,
-        ).fetchall()
+        stmt = select(
+            _RunArtifactCategory.artifact_id,
+            _RunArtifactCategory.uid,
+            _RunArtifactCategory.title,
+        ).where(_RunArtifactCategory.artifact_id.in_(artifact_ids))
 
-        by_artifact: dict[int, dict[str, str]] = {}
-        for row in rows:
-            artifact_id = int(row[0])
-            uid = _safe_str(row[1])
-            title = _safe_str(row[2])
-            if uid is None or title is None:
+        out: dict[int, dict[str, str]] = {}
+        for artifact_id, uid, title in session.execute(stmt):
+            u = _safe_str(uid)
+            t = _safe_str(title)
+            if u is None or t is None:
                 continue
+            out.setdefault(int(artifact_id), {})[u] = t
 
-            if artifact_id not in by_artifact:
-                by_artifact[artifact_id] = {}
-            by_artifact[artifact_id][uid] = title
+        return out
 
-        return by_artifact
-
-    @staticmethod
-    def _load_image_lookup(conn: sqlite3.Connection, product_ids: list[int]) -> dict[int, list[str]]:
+    def _load_image_lookup(self, session: Session, product_ids: list[int]) -> dict[int, list[str]]:
         if not product_ids:
             return {}
 
-        placeholders = ",".join(["?"] * len(product_ids))
-        rows = conn.execute(
-            f"""
-            SELECT product_id, url
-            FROM run_artifact_product_images
-            WHERE product_id IN ({placeholders})
-            ORDER BY product_id ASC, sort_order ASC
-            """,
-            product_ids,
-        ).fetchall()
+        stmt = (
+            select(_RunArtifactProductImage.product_id, _RunArtifactProductImage.url)
+            .where(_RunArtifactProductImage.product_id.in_(product_ids))
+            .order_by(_RunArtifactProductImage.product_id.asc(), _RunArtifactProductImage.sort_order.asc())
+        )
 
-        by_product: dict[int, list[str]] = {}
-        for row in rows:
-            product_id = int(row[0])
-            url = _safe_str(row[1])
-            if url is None:
+        out: dict[int, list[str]] = {}
+        for product_id, url in session.execute(stmt):
+            token = _safe_str(url)
+            if token is None:
                 continue
+            bucket = out.setdefault(int(product_id), [])
+            if token not in bucket:
+                bucket.append(token)
 
-            bucket = by_product.setdefault(product_id, [])
-            if url not in bucket:
-                bucket.append(url)
-
-        return by_product
+        return out
 
     @staticmethod
     def _resolve_category_titles(
@@ -429,3 +475,23 @@ class ReceiverSQLiteRepository:
         if not titles:
             return None
         return " / ".join(titles)
+
+    @staticmethod
+    def _normalize_watermark(value: str | datetime | None) -> str | datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        token = _safe_str(value)
+        return token
+
+
+class ReceiverSQLiteRepository(ReceiverRepository):
+    def __init__(self, db_path: str | Path, *, default_parser_name: str = "fixprice") -> None:
+        path = Path(db_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"receiver sqlite db not found: {path}")
+        super().__init__(
+            f"sqlite:///{path.resolve()}",
+            default_parser_name=default_parser_name,
+        )

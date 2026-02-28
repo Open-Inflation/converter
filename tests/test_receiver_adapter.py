@@ -154,9 +154,8 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            repository = ReceiverSQLiteRepository(db_path)
             with self.assertRaises(RuntimeError) as exc:
-                repository.fetch_batch(limit=10)
+                ReceiverSQLiteRepository(db_path)
             self.assertIn("run_artifacts.parser_name is missing", str(exc.exception))
         finally:
             db_path.unlink(missing_ok=True)

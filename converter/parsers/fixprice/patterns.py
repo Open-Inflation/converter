@@ -14,39 +14,6 @@ WVL_RE = re.compile(r"(?P<q>\d+(?:[.,]\d+)?)\s*(?P<u>г|кг|мл|л|l)\b", re.I
 BY_WEIGHT_RE = re.compile(r"\b(весов(?:ой|ая|ые)?|на\s+вес)\b", re.IGNORECASE)
 BY_VOLUME_RE = re.compile(r"\b(на\s+розлив|розлив|разлив)\b", re.IGNORECASE)
 
-STOPWORDS = {
-    "в",
-    "на",
-    "для",
-    "и",
-    "с",
-    "со",
-    "по",
-    "из",
-    "к",
-    "от",
-    "при",
-    "под",
-    "над",
-    "без",
-    "про",
-    "за",
-    "у",
-    "о",
-    "об",
-    "обо",
-    "это",
-    "эта",
-    "этот",
-    "эти",
-    "ассортимент",
-    "ассорти",
-    "уп",
-    "уп.",
-    "упаковка",
-    "упаковки",
-}
-
 QUOTE_RE = re.compile(r"[\"“”«»]")
 NON_WORD_RE = re.compile(r"[^\w\s.,xх×-]+", re.UNICODE)
 MULTISPACE_RE = re.compile(r"\s+")

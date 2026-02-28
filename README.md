@@ -92,7 +92,7 @@ python3 sync_receiver_to_catalog.py \
 Полный sync `receiver -> catalog` (MySQL):
 
 ```bash
-pip install pymysql
+pip install sqlalchemy pymysql pymorphy3 razdel stop-words
 python3 sync_receiver_to_catalog.py \
   --receiver-db 'mysql+pymysql://user:pass@127.0.0.1:3306/receiver' \
   --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog' \
