@@ -5,8 +5,8 @@ import re
 from converter.core.base import BaseParserHandler
 from converter.core.models import TitleNormalizationResult
 from converter.parsers.category_normalization import normalize_category_text
+from converter.parsers.normalizers import RussianTextNormalizer
 
-from .normalizers import RussianTextNormalizer
 from .title_parser import FixPriceTitleParser
 
 _COMMA_SPACES_RE = re.compile(r"\s*,\s*")

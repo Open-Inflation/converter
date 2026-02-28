@@ -3,7 +3,7 @@ from __future__ import annotations
 from converter.core.base import BaseParserHandler
 from converter.core.models import TitleNormalizationResult
 from converter.parsers.category_normalization import normalize_category_text
-from converter.parsers.fixprice.normalizers import RussianTextNormalizer
+from converter.parsers.normalizers import RussianTextNormalizer
 
 from .title_parser import ChizhikTitleParser
 

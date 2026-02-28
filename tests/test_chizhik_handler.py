@@ -46,6 +46,13 @@ class ChizhikHandlerTests(unittest.TestCase):
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.93)
         self.assertEqual(result.package_unit, "LTR")
 
+    def test_title_parser_handles_mixed_script_and_does_not_expand_cm(self) -> None:
+        result = self.handler.normalize_title("Cалфетки Kitchen Collection 30x30см")
+
+        self.assertEqual(result.name_normalized.split()[0], "салфетка")
+        self.assertIn("см", result.name_normalized.split())
+        self.assertNotIn("смотреть", result.name_normalized.split())
+
     def test_category_normalization_removes_separators_and_stopwords(self) -> None:
         result = self.handler.normalize_category("напитки и соки")
 

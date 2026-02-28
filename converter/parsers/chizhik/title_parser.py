@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from converter.core.models import PackageUnit, TitleNormalizationResult, Unit
-from converter.parsers.fixprice.normalizers import RussianTextNormalizer
+from converter.parsers.normalizers import RussianTextNormalizer
 
 from .patterns import (
     BY_VOLUME_RE,

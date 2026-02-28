@@ -3,8 +3,8 @@ from __future__ import annotations
 import re
 
 from converter.core.models import PackageUnit, TitleNormalizationResult, Unit
+from converter.parsers.normalizers import RussianTextNormalizer
 
-from .normalizers import RussianTextNormalizer
 from .patterns import ASSORT_RE, BY_VOLUME_RE, BY_WEIGHT_RE, DIM_CM_RE, WVL_RE
 
 

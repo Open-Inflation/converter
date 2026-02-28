@@ -30,6 +30,20 @@ class FixPriceHandlerTests(unittest.TestCase):
         self.assertEqual(result.package_unit, "KGM")
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.2)
 
+    def test_title_parser_handles_mixed_latin_cyrillic_prefix_without_split(self) -> None:
+        result = self.handler.normalize_title("Cалфетки Kitchen Collection 30x30см")
+
+        self.assertEqual(result.original_name_no_stopwords.split()[0], "салфетки")
+        self.assertEqual(result.name_normalized.split()[0], "салфетка")
+        self.assertIn("см", result.name_normalized.split())
+        self.assertNotIn("смотреть", result.name_normalized.split())
+
+    def test_title_parser_handles_latin_x_in_cyrillic_word_without_split(self) -> None:
+        result = self.handler.normalize_title("Xлебцы Magic Grain мультизлаковые")
+
+        self.assertEqual(result.original_name_no_stopwords.split()[0], "хлебцы")
+        self.assertEqual(result.name_normalized.split()[0], "хлебец")
+
     def test_category_normalization_removes_separators_and_lemmatizes(self) -> None:
         result = self.handler.normalize_category("молочные продукты, яйца")
 
