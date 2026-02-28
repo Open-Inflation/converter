@@ -221,14 +221,24 @@ class CatalogRepository:
 
         chosen_id: str | None = None
         for identity_type, identity_value in identity_keys:
-            row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+            row = self._get_identity_map_row(
+                session,
+                parser_name=parser_name,
+                identity_type=identity_type,
+                identity_value=identity_value,
+            )
             if row is not None and _safe_str(row.canonical_product_id):
                 chosen_id = row.canonical_product_id
                 break
 
         fallback_identity = self._fallback_identity_value(record)
         if chosen_id is None and fallback_identity is not None:
-            row = session.get(_CatalogIdentityMap, (parser_name, "normalized_name", fallback_identity))
+            row = self._get_identity_map_row(
+                session,
+                parser_name=parser_name,
+                identity_type="normalized_name",
+                identity_value=fallback_identity,
+            )
             if row is not None and _safe_str(row.canonical_product_id):
                 chosen_id = row.canonical_product_id
 
@@ -238,10 +248,16 @@ class CatalogRepository:
         identity_values = list(identity_keys)
         if fallback_identity is not None:
             identity_values.append(("normalized_name", fallback_identity))
+        identity_values = list(dict.fromkeys(identity_values))
 
         now = _utc_now()
         for identity_type, identity_value in identity_values:
-            row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+            row = self._get_identity_map_row(
+                session,
+                parser_name=parser_name,
+                identity_type=identity_type,
+                identity_value=identity_value,
+            )
             if row is None:
                 row = _CatalogIdentityMap(
                     parser_name=parser_name,
@@ -256,6 +272,28 @@ class CatalogRepository:
                 row.updated_at = now
 
         return chosen_id
+
+    @staticmethod
+    def _get_identity_map_row(
+        session: Session,
+        *,
+        parser_name: str,
+        identity_type: str,
+        identity_value: str,
+    ) -> _CatalogIdentityMap | None:
+        # During batch upsert we intentionally keep autoflush disabled.
+        # To avoid duplicate PK inserts in one transaction, inspect pending
+        # rows before hitting DB.
+        for pending in session.new:
+            if not isinstance(pending, _CatalogIdentityMap):
+                continue
+            if (
+                pending.parser_name == parser_name
+                and pending.identity_type == identity_type
+                and pending.identity_value == identity_value
+            ):
+                return pending
+        return session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
 
     @staticmethod
     def _fallback_identity_value(record: NormalizedProductRecord) -> str | None:

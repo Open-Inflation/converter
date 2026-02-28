@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
-from converter.core.models import RawProductRecord
+from converter.core.models import NormalizedProductRecord, RawProductRecord
 
 
 class CatalogSQLiteRepositoryTests(unittest.TestCase):
@@ -99,6 +99,67 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 repo.get_receiver_cursor("fixprice"),
                 ("2026-02-28T10:00:00+00:00", 77),
             )
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_many_handles_duplicate_normalized_identity_in_one_batch(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed_at = datetime(2026, 2, 28, tzinfo=timezone.utc)
+
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                raw_title="Тарелка десертная O`Kit",
+                title_original="Тарелка десертная O`Kit",
+                title_normalized="тарелка десертный o kit",
+                title_original_no_stopwords="тарелка десертная o kit",
+                title_normalized_no_stopwords="тарелка десертный o kit",
+                brand=None,
+                unit="PCE",
+                available_count=None,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-1:1",
+                sku="5093200",
+                observed_at=observed_at,
+            )
+            second = NormalizedProductRecord(
+                parser_name="fixprice",
+                raw_title="Тарелка десертная O`Kit, 2",
+                title_original="Тарелка десертная O`Kit",
+                title_normalized="тарелка десертный o kit",
+                title_original_no_stopwords="тарелка десертная o kit",
+                title_normalized_no_stopwords="тарелка десертный o kit",
+                brand=None,
+                unit="PCE",
+                available_count=None,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-1:2",
+                sku="5093201",
+                observed_at=observed_at,
+            )
+
+            repo.upsert_many([first, second])
+
+            self.assertIsNotNone(first.canonical_product_id)
+            self.assertEqual(first.canonical_product_id, second.canonical_product_id)
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                normalized_rows = conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM catalog_identity_map
+                    WHERE parser_name = ? AND identity_type = ? AND identity_value = ?
+                    """,
+                    ("fixprice", "normalized_name", "тарелка десертный o kit"),
+                ).fetchone()
+                self.assertEqual(int(normalized_rows["cnt"]), 1)
+            finally:
+                conn.close()
         finally:
             db_path.unlink(missing_ok=True)
 
