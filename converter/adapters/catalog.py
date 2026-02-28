@@ -149,6 +149,7 @@ class _CatalogProduct(_CatalogBase):
     primary_category_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    composition_original: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
@@ -202,6 +203,7 @@ class _CatalogProductSnapshot(_CatalogBase):
 
     geo_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    composition_original: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -424,6 +426,7 @@ class CatalogRepository:
         "brand",
         "category_normalized",
         "geo_normalized",
+        "composition_original",
         "composition_normalized",
         "package_quantity",
         "package_unit",
@@ -775,6 +778,7 @@ class CatalogRepository:
             package_unit=record.package_unit,
             category_normalized=record.category_normalized,
             geo_normalized=record.geo_normalized,
+            composition_original=record.composition_original,
             composition_normalized=record.composition_normalized,
             settlement_id=settlement.id if settlement is not None else None,
             observed_at=self._to_utc(record.observed_at),
@@ -1178,6 +1182,7 @@ class CatalogRepository:
                 package_unit=record.package_unit,
                 primary_category_id=primary_category_id,
                 settlement_id=settlement_id,
+                composition_original=record.composition_original,
                 composition_normalized=record.composition_normalized,
                 observed_at=self._to_utc(record.observed_at),
             )
@@ -1251,6 +1256,8 @@ class CatalogRepository:
         if settlement_id is not None:
             existing.settlement_id = settlement_id
 
+        if not _is_missing(record.composition_original):
+            existing.composition_original = record.composition_original
         if not _is_missing(record.composition_normalized):
             existing.composition_normalized = record.composition_normalized
 
@@ -1459,6 +1466,7 @@ class CatalogRepository:
             "discount_price",
             "loyal_price",
             "price_unit",
+            "composition_original",
         )
         missing = [name for name in required if name not in columns]
         if missing:
@@ -1490,6 +1498,7 @@ class CatalogRepository:
             "discount_price",
             "loyal_price",
             "price_unit",
+            "composition_original",
         )
         snapshot_missing = [name for name in snapshot_required if name not in snapshot_columns]
         if snapshot_missing:

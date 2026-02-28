@@ -115,6 +115,8 @@ class NormalizedProductRecord:
 
     geo_normalized: str | None = None
 
+    composition_original: str | None = None
+
     composition_normalized: str | None = None
 
     image_urls: list[str] = field(default_factory=list)

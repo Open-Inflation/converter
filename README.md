@@ -61,6 +61,7 @@ converter/
 
 Converter сохраняет расширенный product-контракт без потерь: в snapshots/current projection
 пишутся цены (`price/discount_price/loyal_price/price_unit`), product-флаги и producer/rating,
+оригинальный и нормализованный состав (`composition_original` / `composition_normalized`),
 а полный источник из receiver (product/artifact/admin/categories/images/meta/wholesale/category-links)
 сохраняется в реляционных таблицах `catalog_*_payload_nodes` (без JSON-колонок).
 

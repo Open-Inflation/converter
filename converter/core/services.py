@@ -85,6 +85,7 @@ class NullBackfillService:
         "brand",
         "category_normalized",
         "geo_normalized",
+        "composition_original",
         "composition_normalized",
         "package_quantity",
         "package_unit",

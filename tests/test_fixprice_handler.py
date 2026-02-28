@@ -89,6 +89,7 @@ class PipelineBackfillTests(unittest.TestCase):
         self.assertEqual(first.canonical_product_id, second.canonical_product_id)
         self.assertEqual(second.category_normalized, "продукт")
         self.assertEqual(second.geo_normalized, "санкт-петербург")
+        self.assertEqual(second.composition_original, "Сахар, какао, молоко")
         self.assertEqual(second.composition_normalized, "сахар, какао, молоко")
 
 

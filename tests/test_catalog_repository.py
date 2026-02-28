@@ -87,6 +87,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
                 self.assertIn("price", product_columns)
+                self.assertIn("composition_original", product_columns)
                 self.assertNotIn("title_normalized", product_columns)
                 self.assertNotIn("title_original_no_stopwords", product_columns)
                 self.assertNotIn("source_payload_json", product_columns)
@@ -97,6 +98,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("title_original", snapshot_columns)
                 self.assertIn("title_normalized_no_stopwords", snapshot_columns)
                 self.assertIn("price", snapshot_columns)
+                self.assertIn("composition_original", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
                 self.assertNotIn("title_original_no_stopwords", snapshot_columns)
                 self.assertNotIn("source_payload_json", snapshot_columns)
@@ -321,6 +323,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             self.assertEqual(first_norm.canonical_product_id, second_norm.canonical_product_id)
             self.assertEqual(second_norm.category_normalized, "продукт")
             self.assertEqual(second_norm.geo_normalized, "санкт-петербург")
+            self.assertEqual(second_norm.composition_original, "Сахар, какао, молоко")
             self.assertEqual(second_norm.composition_normalized, "сахар, какао, молоко")
 
             conn = sqlite3.connect(db_path)
@@ -334,6 +337,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                         source_id,
                         primary_category_id,
                         settlement_id,
+                        composition_original,
                         composition_normalized
                     FROM catalog_products
                     ORDER BY id ASC
@@ -341,6 +345,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchall()
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(rows[0]["canonical_product_id"], rows[1]["canonical_product_id"])
+                self.assertEqual(rows[1]["composition_original"], "Сахар, какао, молоко")
                 self.assertEqual(rows[1]["composition_normalized"], "сахар, какао, молоко")
                 self.assertIsNotNone(rows[0]["primary_category_id"])
                 self.assertIsNotNone(rows[0]["settlement_id"])
@@ -574,6 +579,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 sku="null-1",
                 category_normalized="посуда",
                 geo_normalized="rus, москва",
+                composition_original="Сталь",
                 composition_normalized="сталь",
                 image_urls=["https://cdn.example/spoons.jpg"],
                 observed_at=observed,
@@ -606,7 +612,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 row = conn.execute(
                     """
-                    SELECT id, brand, primary_category_id, settlement_id, composition_normalized
+                    SELECT id, brand, primary_category_id, settlement_id, composition_original, composition_normalized
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -617,6 +623,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(row["brand"], "O'Kitchen")
                 self.assertIsNotNone(row["primary_category_id"])
                 self.assertIsNotNone(row["settlement_id"])
+                self.assertEqual(row["composition_original"], "Сталь")
                 self.assertEqual(row["composition_normalized"], "сталь")
                 self.assertEqual(
                     self._asset_values(

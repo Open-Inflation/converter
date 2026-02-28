@@ -59,6 +59,7 @@ class BaseParserHandler(ABC):
             sku=raw.sku,
             category_normalized=self.normalize_category(raw.category),
             geo_normalized=self.normalize_geo(raw.geo),
+            composition_original=self._raw_string(raw.composition),
             composition_normalized=self.normalize_composition(raw.composition),
             image_urls=list(raw.image_urls),
             observed_at=raw.observed_at,
@@ -77,6 +78,13 @@ class BaseParserHandler(ABC):
 
     def normalize_composition(self, composition: str | None) -> str | None:
         return self._normalize_string(composition)
+
+    @staticmethod
+    def _raw_string(value: str | None) -> str | None:
+        if value is None:
+            return None
+        token = value.strip()
+        return token or None
 
     @staticmethod
     def _normalize_string(value: str | None) -> str | None:
