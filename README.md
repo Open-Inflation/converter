@@ -1,44 +1,114 @@
 # converter
 
-Конвертер работает уже с спарсенными данными и преобразовывает их для постоянного хранения (в отдельную БД). Конвертер делегирует работу с данными модулям в зависимости от парсера в ране. Так например:
+Конвертер принимает уже спарсенные товары из `receiver`, нормализует поля и готовит запись для `catalog`.
 
-1. fixprice:
-Имеет общий паттерн вида:
-`Название, Бренд(опционально), floatXfloat ИЛИ floatXfloatXfloat ИЛИ float (см/мл/л), int(сколько штук (сопряженное слово может быть любым), опционально), в ассортименте`
-Пример:
-`Ручка гелевая "Помада", With Love, 10х1,5 см, в ассортименте`
-Нужно:
-1. Сосчитать unit, нормализировать название, так же предоставить оригинальное название без стоп-слов и нормализированное название без стоп слов
-Юнит:
-    # Unit guide:
-    # Chocolate 200 g:
-    #   unit="PCE", available_count=15, package_quantity=0.2, package_unit="KGM"
-    # Milk 1 L:
-    #   unit="PCE", available_count=10, package_quantity=1, package_unit="LTR"
-    # Potatoes by weight:
-    #   unit="KGM", available_count=12.7, package_quantity=None, package_unit=None
-    # Water vending:
-    #   unit="LTR", available_count=29.2, package_quantity=0.5, package_unit="LTR"
-    unit: Literal["PCE", "KGM", "LTR"]
-    available_count: int | float | None
-    package_quantity: float | None
-    package_unit: Literal["KGM", "LTR"] | None
+## Что реализовано
 
-Каждый модуль парсера должен делится на суб модули и жить в отдельных папках
+- Общий `BaseParserHandler` (мастер-класс) с единым контрактом нормализации.
+- Реестр обработчиков `HandlerRegistry` для выбора модуля по `parser_name`.
+- Отдельный модуль `parsers/fixprice` с парсером title и `FixPriceHandler`.
+- Пайплайн `ConverterPipeline`:
+  - обработчик парсера,
+  - резолв canonical product id (`plu/sku/source_id + parser`),
+  - persistent image dedup,
+  - backfill `NULL` полей по ближайшей версии товара во времени.
 
-Состав продукта, если имеется, так же нужно нормализировать в отдельным полем. ВАЖНО: данные не теряем, мы их только дополняем.
+## Архитектура
 
-Так же нормализируем и другое: категории, гео и тп (все в отдельные столбцы).
+```text
+converter/
+  core/
+    base.py          # мастер-класс обработчика
+    models.py        # raw/normalized dataclass-модели
+    ports.py         # интерфейсы receiver/catalog/storage
+    registry.py      # реестр обработчиков
+    services.py      # identity, image dedup, null-backfill
+  parsers/
+    fixprice/
+      handler.py     # обработчик Fix Price
+      title_parser.py
+      normalizers.py
+      patterns.py
+  pipeline.py        # orchestration
+```
 
-Общую логику для всех парсеров выводим в мастер класс.
+## Fix Price handler
 
-Изображения обрабатываем через персистентный анализ, если они одинаковые, шлем на storage запросы на удаление дубликатов, если разные, сохраняем ссылки на них.
+Поддержан паттерн вида:
 
-У каждого товара должен быть уникальный ID в базе (не уникальный ключ всмысле СУБД). Когда парсер находит plu/sku+parser_name он автоматически считает что это один товар и присваивает им тот же ID что у оригинала, те NULL значения что у него, автоматически должны подставлятся на не нулл значения у ближайшего по времени не NULL варианта. Та же логика с категориями.
+`Название, Бренд(опц), floatXfloat[ Xfloat ] см ИЛИ float (г/кг/мл/л), int(кол-во, опц), в ассортименте`
 
-База receiver и база catalog это разные базы данных и данные гоняются из одной в другую.
+Из title формируются:
 
-Смежные проекты:
-../dataclass
-../storage
-../receiver
+- `title_original`
+- `title_normalized`
+- `title_original_no_stopwords`
+- `title_normalized_no_stopwords`
+- `unit`, `available_count`, `package_quantity`, `package_unit`
+
+Unit guide:
+
+- `Chocolate 200 g` -> `unit=PCE`, `available_count=15`, `package_quantity=0.2`, `package_unit=KGM`
+- `Milk 1 L` -> `unit=PCE`, `available_count=10`, `package_quantity=1`, `package_unit=LTR`
+- `Potatoes by weight` -> `unit=KGM`, `available_count=None`, `package_quantity=None`
+- `Water vending` -> `unit=LTR`, `available_count=None`, `package_quantity=None`
+
+## Запуск демо
+
+```bash
+python3 example_fixprice_title_parser.py
+```
+
+## Тесты
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+## Интеграция с receiver
+
+Есть адаптер под SQLite-базу `receiver`:
+
+- `converter.adapters.ReceiverSQLiteRepository`
+- поддерживает только актуальную схему `receiver` (`run_artifacts.parser_name` обязателен).
+- если колонка отсутствует, адаптер выбрасывает ошибку и требует применить ручные миграции `receiver` от `2026-02-26`.
+
+Есть sink под SQLite-базу `catalog`:
+
+- `converter.adapters.CatalogSQLiteRepository`
+- выполняет `upsert` нормализованных товаров;
+- хранит persistent `canonical_product_id` map, image fingerprints и sync cursor.
+
+Полный sync `receiver -> catalog` (SQLite):
+
+```bash
+python3 sync_receiver_to_catalog.py \
+  --receiver-db ../receiver/data/receiver.db \
+  --catalog-db ./data/catalog.db \
+  --parser-name fixprice \
+  --batch-size 250
+```
+
+Полный sync `receiver -> catalog` (MySQL):
+
+```bash
+pip install pymysql
+python3 sync_receiver_to_catalog.py \
+  --receiver-db 'mysql+pymysql://user:pass@127.0.0.1:3306/receiver' \
+  --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog' \
+  --parser-name fixprice \
+  --batch-size 250
+```
+
+## Как расширять
+
+1. Создать папку `converter/parsers/<parser_name>/`.
+2. Реализовать `<ParserName>Handler(BaseParserHandler)`.
+3. Зарегистрировать в `converter/parsers/__init__.py`.
+4. При необходимости добавить parser-specific normalizers/patterns.
+
+## Смежные проекты
+
+- `../dataclass`
+- `../storage`
+- `../receiver`
