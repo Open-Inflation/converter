@@ -9,6 +9,15 @@ from pathlib import Path
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
 from converter.core.models import NormalizedProductRecord, RawProductRecord
+from converter.core.ports import StorageRepository
+
+
+class _FakeStorageRepository(StorageRepository):
+    def __init__(self) -> None:
+        self.deleted_batches: list[list[str]] = []
+
+    def delete_images(self, urls) -> None:  # type: ignore[override]
+        self.deleted_batches.append(list(urls))
 
 
 class CatalogSQLiteRepositoryTests(unittest.TestCase):
@@ -255,6 +264,39 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(int(link_rows["cnt"]), 2)
             finally:
                 conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_requests_storage_delete_for_duplicate_images(self) -> None:
+        db_path = self._make_db()
+        try:
+            storage = _FakeStorageRepository()
+            repo = CatalogSQLiteRepository(db_path, storage_repository=storage)
+
+            record = NormalizedProductRecord(
+                parser_name="fixprice",
+                raw_title="Тест",
+                title_original="Тест",
+                title_normalized="тест",
+                title_original_no_stopwords="тест",
+                title_normalized_no_stopwords="тест",
+                brand=None,
+                unit="PCE",
+                available_count=None,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-dup:1",
+                sku="dup-1",
+                image_urls=[
+                    "http://storage.local/images/dup.webp",
+                    "http://storage.local/images/dup.webp",
+                ],
+                observed_at=datetime(2026, 2, 20, tzinfo=timezone.utc),
+            )
+
+            repo.upsert_many([record])
+
+            self.assertEqual(storage.deleted_batches, [["http://storage.local/images/dup.webp"]])
         finally:
             db_path.unlink(missing_ok=True)
 

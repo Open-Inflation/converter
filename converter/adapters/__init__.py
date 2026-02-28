@@ -3,6 +3,7 @@ from .catalog_mysql import CatalogMySQLRepository
 from .mysql_common import MySQLDsnError, is_mysql_dsn, parse_mysql_dsn
 from .receiver import ReceiverSQLiteRepository, map_receiver_row_to_raw_product
 from .receiver_mysql import ReceiverMySQLRepository
+from .storage_http import StorageHTTPRepository
 
 __all__ = [
     "CatalogMySQLRepository",
@@ -10,6 +11,7 @@ __all__ = [
     "MySQLDsnError",
     "ReceiverSQLiteRepository",
     "ReceiverMySQLRepository",
+    "StorageHTTPRepository",
     "is_mysql_dsn",
     "map_receiver_row_to_raw_product",
     "parse_mysql_dsn",

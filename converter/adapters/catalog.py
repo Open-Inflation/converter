@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from converter.core.models import NormalizedProductRecord
-
+from converter.core.ports import StorageRepository
 
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
@@ -290,7 +291,13 @@ class CatalogRepository:
         "package_unit",
     )
 
-    def __init__(self, database_url: str, *, engine: Engine | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        engine: Engine | None = None,
+        storage_repository: StorageRepository | None = None,
+    ) -> None:
         self._database_url = database_url
         self._engine = engine or self._create_engine(database_url)
         self._session_factory = sessionmaker(
@@ -299,6 +306,9 @@ class CatalogRepository:
             autoflush=False,
             autocommit=False,
             expire_on_commit=False,
+        )
+        self._storage_repository: StorageRepository | None = (
+            storage_repository or self._build_storage_repository_from_env()
         )
         _CatalogBase.metadata.create_all(self._engine)
         self._validate_catalog_products_schema()
@@ -494,7 +504,7 @@ class CatalogRepository:
                 continue
 
             fingerprint = hashlib.sha256(url.encode("utf-8")).hexdigest()
-            row = session.get(_CatalogImageFingerprint, fingerprint)
+            row = self._get_image_fingerprint_row(session, fingerprint)
 
             if row is None:
                 canonical_url = url
@@ -519,9 +529,31 @@ class CatalogRepository:
             unique_urls.append(canonical_url)
             fingerprints.append(fingerprint)
 
+        duplicates_to_delete = list(dict.fromkeys(duplicate_urls))
         record.image_urls = unique_urls
-        record.duplicate_image_urls = duplicate_urls
+        record.duplicate_image_urls = []
         record.image_fingerprints = fingerprints
+        self._delete_duplicate_images(duplicates_to_delete)
+
+    @staticmethod
+    def _get_image_fingerprint_row(
+        session: Session,
+        fingerprint: str,
+    ) -> _CatalogImageFingerprint | None:
+        for pending in session.new:
+            if not isinstance(pending, _CatalogImageFingerprint):
+                continue
+            if pending.fingerprint == fingerprint:
+                return pending
+        return session.get(_CatalogImageFingerprint, fingerprint)
+
+    def _delete_duplicate_images(self, duplicate_urls: list[str]) -> None:
+        if not duplicate_urls:
+            return
+        if self._storage_repository is None:
+            return
+
+        self._storage_repository.delete_images(duplicate_urls)
 
     def _apply_backfill(self, session: Session, record: NormalizedProductRecord) -> None:
         canonical_product_id = _safe_str(record.canonical_product_id)
@@ -1144,10 +1176,49 @@ class CatalogRepository:
                 f"{', '.join(missing)}. Apply DB migrations before starting converter."
             )
 
+    @staticmethod
+    def _build_storage_repository_from_env() -> StorageRepository | None:
+        base_url = (
+            (os.getenv("CONVERTER_STORAGE_BASE_URL") or "").strip()
+            or (os.getenv("STORAGE_BASE_URL") or "").strip()
+        )
+        api_token = (
+            (os.getenv("CONVERTER_STORAGE_API_TOKEN") or "").strip()
+            or (os.getenv("STORAGE_API_TOKEN") or "").strip()
+        )
+        if not base_url or not api_token:
+            return None
+
+        strict_raw = (os.getenv("CONVERTER_STORAGE_DELETE_STRICT") or "0").strip().lower()
+        fail_on_error = strict_raw in {"1", "true", "yes", "y", "on"}
+
+        timeout_raw = (os.getenv("CONVERTER_STORAGE_DELETE_TIMEOUT_SEC") or "10").strip()
+        try:
+            timeout_seconds = max(0.1, float(timeout_raw))
+        except ValueError:
+            timeout_seconds = 10.0
+
+        from .storage_http import StorageHTTPRepository
+
+        return StorageHTTPRepository(
+            base_url=base_url,
+            api_token=api_token,
+            timeout_seconds=timeout_seconds,
+            fail_on_error=fail_on_error,
+        )
+
 
 class CatalogSQLiteRepository(CatalogRepository):
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        storage_repository: StorageRepository | None = None,
+    ) -> None:
         path = Path(db_path)
         if path.parent and not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-        super().__init__(f"sqlite:///{path.resolve()}")
+        super().__init__(
+            f"sqlite:///{path.resolve()}",
+            storage_repository=storage_repository,
+        )

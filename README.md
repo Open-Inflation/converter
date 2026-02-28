@@ -6,7 +6,7 @@
 
 - Общий `BaseParserHandler` (мастер-класс) с единым контрактом нормализации.
 - Реестр обработчиков `HandlerRegistry` для выбора модуля по `parser_name`.
-- Отдельный модуль `parsers/fixprice` с парсером title и `FixPriceHandler`.
+- Отдельные модули `parsers/fixprice`, `parsers/chizhik`, `parsers/perekrestok` с parser-specific title обработчиками.
 - Пайплайн `ConverterPipeline`:
   - обработчик парсера,
   - резолв canonical product id (`plu/sku/source_id + parser`),
@@ -29,6 +29,13 @@ converter/
       title_parser.py
       normalizers.py
       patterns.py
+    chizhik/
+      handler.py     # обработчик Чижик
+      title_parser.py
+      patterns.py
+    perekrestok/
+      handler.py     # обработчик Перекрёсток
+      title_parser.py
   sync.py            # сервис batch-sync receiver -> catalog
   daemon.py          # очередь + HTTP trigger API
   pipeline.py        # title/category/geo/composition normalization
@@ -119,6 +126,17 @@ python3 sync_receiver_to_catalog.py \
   --parser-name fixprice \
   --batch-size 250
 ```
+
+### Очистка дублей изображений в storage
+
+Конвертер может удалять duplicate image URLs сразу в момент `upsert_many`:
+
+- `CONVERTER_STORAGE_BASE_URL` (или `STORAGE_BASE_URL`) — базовый URL storage.
+- `CONVERTER_STORAGE_API_TOKEN` (или `STORAGE_API_TOKEN`) — токен `Bearer`.
+- `CONVERTER_STORAGE_DELETE_TIMEOUT_SEC` — timeout `DELETE` запроса (по умолчанию `10`).
+- `CONVERTER_STORAGE_DELETE_STRICT` — если `1/true`, ошибка удаления прерывает обработку.
+
+Удаление выполняется только для URL текущего storage origin и путей `/images/<name>`.
 
 ### Демон + очередь + trigger
 
