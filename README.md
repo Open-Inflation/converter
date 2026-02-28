@@ -34,6 +34,24 @@ converter/
   pipeline.py        # title/category/geo/composition normalization
 ```
 
+## Catalog schema (бережный перенос)
+
+`catalog` теперь хранит данные не только в projection-таблице, а в нормализованной структуре с историей:
+
+- `catalog_product_snapshots` - append-only история версий товара (каждый проход sync добавляет snapshot, без перетирания прошлого).
+- `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
+- `catalog_settlements` - справочник населенных пунктов/регионов/стран.
+- `catalog_settlement_geodata` - история геоточек (`lat/lon`) по settlement.
+- `catalog_categories` - справочник категорий (uid/title/depth/parent).
+- `catalog_product_category_links` - связи snapshot -> category.
+- `catalog_products` - текущая проекция (read-model) для быстрых чтений.
+
+Политика обновления:
+
+- история не удаляется и не перезаписывается (`append-only snapshots`);
+- справочники (`settlements/categories/geodata`) пополняются и дополняются;
+- `catalog_products` обновляется неразрушительно: `NULL/пустые` новые значения не затирают заполненные старые.
+
 ## Fix Price handler
 
 Поддержан паттерн вида:

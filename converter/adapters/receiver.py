@@ -55,7 +55,11 @@ class _RunArtifactCategory(_ReceiverBase):
     id: Mapped[int] = mapped_column(primary_key=True)
     artifact_id: Mapped[int] = mapped_column(nullable=False)
     uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    depth: Mapped[int | None] = mapped_column(nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class _RunArtifactAdministrativeUnit(_ReceiverBase):
@@ -64,9 +68,13 @@ class _RunArtifactAdministrativeUnit(_ReceiverBase):
     id: Mapped[int] = mapped_column(primary_key=True)
     artifact_id: Mapped[int] = mapped_column(nullable=False)
 
+    settlement_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     region: Mapped[str | None] = mapped_column(String(255), nullable=True)
     country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    longitude: Mapped[float | None] = mapped_column(nullable=True)
+    latitude: Mapped[float | None] = mapped_column(nullable=True)
 
 
 class _RunArtifactProductImage(_ReceiverBase):
@@ -233,6 +241,10 @@ def map_receiver_row_to_raw_product(
 
     category_uids = _as_string_list(row.get("category_uids_json"))
 
+    receiver_categories = row.get("receiver_categories")
+    if not isinstance(receiver_categories, list):
+        receiver_categories = []
+
     payload = {
         "receiver_product_id": row.get("product_id"),
         "receiver_artifact_id": row.get("artifact_id"),
@@ -240,6 +252,14 @@ def map_receiver_row_to_raw_product(
         "receiver_source": _safe_str(row.get("artifact_source")),
         "receiver_sort_order": row.get("product_sort_order"),
         "receiver_categories_uid": category_uids,
+        "receiver_categories": receiver_categories,
+        "receiver_geo_country": _safe_str(row.get("geo_country")),
+        "receiver_geo_region": _safe_str(row.get("geo_region")),
+        "receiver_geo_name": _safe_str(row.get("geo_name")),
+        "receiver_geo_settlement_type": _safe_str(row.get("geo_settlement_type")),
+        "receiver_geo_alias": _safe_str(row.get("geo_alias")),
+        "receiver_geo_longitude": _as_float(row.get("geo_longitude")),
+        "receiver_geo_latitude": _as_float(row.get("geo_latitude")),
     }
 
     return RawProductRecord(
@@ -349,7 +369,7 @@ class ReceiverRepository:
             artifact_ids = sorted({product.artifact_id for product, _, _ in rows})
             product_ids = sorted({product.id for product, _, _ in rows})
 
-            category_lookup = self._load_category_title_lookup(session, artifact_ids)
+            category_lookup = self._load_category_lookup(session, artifact_ids)
             image_lookup = self._load_image_lookup(session, product_ids)
 
             out: list[RawProductRecord] = []
@@ -373,13 +393,21 @@ class ReceiverRepository:
                     "artifact_source": artifact.source,
                     "ingested_at": artifact.ingested_at,
                     "parser_name": artifact.parser_name,
+                    "geo_settlement_type": admin.settlement_type if admin else None,
                     "geo_name": admin.name if admin else None,
+                    "geo_alias": admin.alias if admin else None,
                     "geo_region": admin.region if admin else None,
                     "geo_country": admin.country if admin else None,
+                    "geo_longitude": admin.longitude if admin else None,
+                    "geo_latitude": admin.latitude if admin else None,
                 }
 
                 category_uids = _as_string_list(row_data.get("category_uids_json"))
                 row_data["category_titles"] = self._resolve_category_titles(
+                    category_uids,
+                    category_lookup.get(product.artifact_id, {}),
+                )
+                row_data["receiver_categories"] = self._resolve_categories_payload(
                     category_uids,
                     category_lookup.get(product.artifact_id, {}),
                 )
@@ -407,27 +435,38 @@ class ReceiverRepository:
                 "Apply receiver manual migrations from 2026-02-26."
             )
 
-    def _load_category_title_lookup(
+    def _load_category_lookup(
         self,
         session: Session,
         artifact_ids: list[int],
-    ) -> dict[int, dict[str, str]]:
+    ) -> dict[int, dict[str, dict[str, Any]]]:
         if not artifact_ids:
             return {}
 
         stmt = select(
             _RunArtifactCategory.artifact_id,
             _RunArtifactCategory.uid,
+            _RunArtifactCategory.parent_uid,
+            _RunArtifactCategory.alias,
             _RunArtifactCategory.title,
+            _RunArtifactCategory.depth,
+            _RunArtifactCategory.sort_order,
         ).where(_RunArtifactCategory.artifact_id.in_(artifact_ids))
 
-        out: dict[int, dict[str, str]] = {}
-        for artifact_id, uid, title in session.execute(stmt):
+        out: dict[int, dict[str, dict[str, Any]]] = {}
+        for artifact_id, uid, parent_uid, alias, title, depth, sort_order in session.execute(stmt):
             u = _safe_str(uid)
             t = _safe_str(title)
             if u is None or t is None:
                 continue
-            out.setdefault(int(artifact_id), {})[u] = t
+            out.setdefault(int(artifact_id), {})[u] = {
+                "uid": u,
+                "parent_uid": _safe_str(parent_uid),
+                "alias": _safe_str(alias),
+                "title": t,
+                "depth": int(depth) if isinstance(depth, int) else None,
+                "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
+            }
 
         return out
 
@@ -455,7 +494,7 @@ class ReceiverRepository:
     @staticmethod
     def _resolve_category_titles(
         category_uids: list[str],
-        category_lookup: dict[str, str],
+        category_lookup: dict[str, dict[str, Any]],
     ) -> str | None:
         if not category_uids:
             return None
@@ -463,7 +502,7 @@ class ReceiverRepository:
         titles: list[str] = []
         seen: set[str] = set()
         for uid in category_uids:
-            title = _safe_str(category_lookup.get(uid))
+            title = _safe_str((category_lookup.get(uid) or {}).get("title"))
             if title is None:
                 continue
             lowered = title.lower()
@@ -475,6 +514,37 @@ class ReceiverRepository:
         if not titles:
             return None
         return " / ".join(titles)
+
+    @staticmethod
+    def _resolve_categories_payload(
+        category_uids: list[str],
+        category_lookup: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for idx, uid in enumerate(category_uids):
+            entry = category_lookup.get(uid)
+            if not isinstance(entry, dict):
+                out.append(
+                    {
+                        "uid": uid,
+                        "title": None,
+                        "sort_order": idx,
+                    }
+                )
+                continue
+
+            out.append(
+                {
+                    "uid": _safe_str(entry.get("uid")) or uid,
+                    "parent_uid": _safe_str(entry.get("parent_uid")),
+                    "alias": _safe_str(entry.get("alias")),
+                    "title": _safe_str(entry.get("title")),
+                    "depth": entry.get("depth") if isinstance(entry.get("depth"), int) else None,
+                    "sort_order": entry.get("sort_order") if isinstance(entry.get("sort_order"), int) else idx,
+                }
+            )
+
+        return out
 
     @staticmethod
     def _normalize_watermark(value: str | datetime | None) -> str | datetime | None:

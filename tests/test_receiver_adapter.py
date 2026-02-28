@@ -52,7 +52,11 @@ def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bo
             id INTEGER PRIMARY KEY,
             artifact_id INTEGER,
             uid TEXT,
-            title TEXT
+            parent_uid TEXT,
+            alias TEXT,
+            title TEXT,
+            depth INTEGER,
+            sort_order INTEGER
         )
         """
     )
@@ -62,9 +66,13 @@ def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bo
         CREATE TABLE run_artifact_administrative_units (
             id INTEGER PRIMARY KEY,
             artifact_id INTEGER,
+            settlement_type TEXT,
             name TEXT,
+            alias TEXT,
             region TEXT,
-            country TEXT
+            country TEXT,
+            longitude REAL,
+            latitude REAL
         )
         """
     )
