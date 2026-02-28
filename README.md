@@ -29,7 +29,9 @@ converter/
       title_parser.py
       normalizers.py
       patterns.py
-  pipeline.py        # orchestration
+  sync.py            # сервис batch-sync receiver -> catalog
+  daemon.py          # очередь + HTTP trigger API
+  pipeline.py        # title/category/geo/composition normalization
 ```
 
 ## Fix Price handler
@@ -99,6 +101,51 @@ python3 sync_receiver_to_catalog.py \
   --parser-name fixprice \
   --batch-size 250
 ```
+
+### Демон + очередь + trigger
+
+Запуск daemon-процесса (очередь задач + HTTP API):
+
+```bash
+python3 converter_daemon.py \
+  --host 127.0.0.1 \
+  --port 8090 \
+  --receiver-db ../receiver/data/receiver.db \
+  --catalog-db ./data/catalog.db \
+  --parser-name fixprice \
+  --batch-size 250 \
+  --max-queue-size 100
+```
+
+HTTP точки:
+
+- `GET /health` — состояние воркера и очереди.
+- `POST /trigger` — поставить sync-задачу в очередь.
+
+Пример trigger-запроса:
+
+```bash
+curl -X POST http://127.0.0.1:8090/trigger \
+  -H 'Content-Type: application/json' \
+  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver"}'
+```
+
+Дедупликация очереди выполняется по ключу `(receiver_db, catalog_db, parser_name)`:
+пока задача с тем же ключом в pending/active, повторный trigger не создаст дубль.
+
+### Автотриггер из receiver
+
+В `receiver` добавлен post-run hook: при `status=success` он отправляет trigger в converter daemon.
+
+Переменные окружения `receiver`:
+
+- `CONVERTER_TRIGGER_URL` — например `http://127.0.0.1:8090/trigger`.
+- `CONVERTER_TRIGGER_TOKEN` — bearer token (если у daemon задан `--auth-token`).
+- `CONVERTER_TRIGGER_TIMEOUT_SEC` — timeout запроса (по умолчанию `3`).
+- `CONVERTER_TRIGGER_RECEIVER_DB` — опционально переопределяет `receiver_db` в payload.
+- `CONVERTER_TRIGGER_CATALOG_DB` — опционально переопределяет `catalog_db` в payload.
+- `CONVERTER_TRIGGER_BATCH_SIZE` — опционально переопределяет batch size.
+- `CONVERTER_TRIGGER_MAX_BATCHES` — опционально ограничивает число batch-ов за один trigger.
 
 ## Как расширять
 
