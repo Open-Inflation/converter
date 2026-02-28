@@ -81,6 +81,24 @@ class _CatalogProduct(_CatalogBase):
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    producer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    producer_country: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expiration_date_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discount_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loyal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    adult: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_new: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    promo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    season: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    data_matrix: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
     available_count: Mapped[float | None] = mapped_column(nullable=True)
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
@@ -94,6 +112,7 @@ class _CatalogProduct(_CatalogBase):
     image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     duplicate_image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    source_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
@@ -119,6 +138,23 @@ class _CatalogProductSnapshot(_CatalogBase):
     title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    producer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    producer_country: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expiration_date_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discount_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loyal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    adult: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_new: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    promo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    season: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    data_matrix: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
     available_count: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -136,6 +172,7 @@ class _CatalogProductSnapshot(_CatalogBase):
     image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     duplicate_image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    source_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
@@ -600,7 +637,7 @@ class CatalogRepository:
         settlement: _CatalogSettlement | None,
     ) -> _CatalogProductSnapshot:
         now = _utc_now()
-        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
+        payload = self._source_payload(record)
 
         snapshot = _CatalogProductSnapshot(
             canonical_product_id=record.canonical_product_id or str(uuid4()),
@@ -613,6 +650,23 @@ class CatalogRepository:
             title_original=record.title_original,
             title_normalized_no_stopwords=record.title_normalized_no_stopwords,
             brand=record.brand,
+            source_page_url=record.source_page_url,
+            description=record.description,
+            producer_name=record.producer_name,
+            producer_country=record.producer_country,
+            expiration_date_in_days=record.expiration_date_in_days,
+            rating=record.rating,
+            reviews_count=record.reviews_count,
+            price=record.price,
+            discount_price=record.discount_price,
+            loyal_price=record.loyal_price,
+            price_unit=record.price_unit,
+            adult=record.adult,
+            is_new=record.is_new,
+            promo=record.promo,
+            season=record.season,
+            hit=record.hit,
+            data_matrix=record.data_matrix,
             unit=record.unit,
             available_count=record.available_count,
             package_quantity=record.package_quantity,
@@ -624,6 +678,7 @@ class CatalogRepository:
             image_urls_json=list(record.image_urls),
             duplicate_image_urls_json=list(record.duplicate_image_urls),
             image_fingerprints_json=list(record.image_fingerprints),
+            source_payload_json=payload,
             observed_at=self._to_utc(record.observed_at),
             created_at=now,
         )
@@ -730,7 +785,7 @@ class CatalogRepository:
         if settlement is None or settlement.id is None:
             return
 
-        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
+        payload = self._source_payload(record)
         latitude = _as_float(payload.get("receiver_geo_latitude"))
         longitude = _as_float(payload.get("receiver_geo_longitude"))
         if latitude is None or longitude is None:
@@ -859,7 +914,7 @@ class CatalogRepository:
                     link.is_primary = True
 
     def _extract_geo_components(self, record: NormalizedProductRecord) -> dict[str, object] | None:
-        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
+        payload = self._source_payload(record)
 
         country = _safe_str(payload.get("receiver_geo_country"))
         region = _safe_str(payload.get("receiver_geo_region"))
@@ -899,7 +954,7 @@ class CatalogRepository:
         }
 
     def _extract_category_candidates(self, record: NormalizedProductRecord) -> list[dict[str, object]]:
-        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
+        payload = self._source_payload(record)
         raw = payload.get("receiver_categories")
 
         out: list[dict[str, object]] = []
@@ -975,6 +1030,7 @@ class CatalogRepository:
         categories: list[tuple[_CatalogCategory, int]],
     ) -> None:
         now = _utc_now()
+        payload = self._source_payload(record)
         source_id = self._source_id(record)
         primary_category_id = self._primary_category_id(categories)
         settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
@@ -998,6 +1054,23 @@ class CatalogRepository:
                 title_original=record.title_original,
                 title_normalized_no_stopwords=record.title_normalized_no_stopwords,
                 brand=record.brand,
+                source_page_url=record.source_page_url,
+                description=record.description,
+                producer_name=record.producer_name,
+                producer_country=record.producer_country,
+                expiration_date_in_days=record.expiration_date_in_days,
+                rating=record.rating,
+                reviews_count=record.reviews_count,
+                price=record.price,
+                discount_price=record.discount_price,
+                loyal_price=record.loyal_price,
+                price_unit=record.price_unit,
+                adult=record.adult,
+                is_new=record.is_new,
+                promo=record.promo,
+                season=record.season,
+                hit=record.hit,
+                data_matrix=record.data_matrix,
                 unit=record.unit,
                 available_count=record.available_count,
                 package_quantity=record.package_quantity,
@@ -1008,6 +1081,7 @@ class CatalogRepository:
                 image_urls_json=list(record.image_urls),
                 duplicate_image_urls_json=list(record.duplicate_image_urls),
                 image_fingerprints_json=list(record.image_fingerprints),
+                source_payload_json=payload,
                 observed_at=self._to_utc(record.observed_at),
             )
             session.add(existing)
@@ -1028,6 +1102,40 @@ class CatalogRepository:
 
         if not _is_missing(record.brand):
             existing.brand = record.brand
+        if not _is_missing(record.source_page_url):
+            existing.source_page_url = record.source_page_url
+        if not _is_missing(record.description):
+            existing.description = record.description
+        if not _is_missing(record.producer_name):
+            existing.producer_name = record.producer_name
+        if not _is_missing(record.producer_country):
+            existing.producer_country = record.producer_country
+        if not _is_missing(record.expiration_date_in_days):
+            existing.expiration_date_in_days = record.expiration_date_in_days
+        if not _is_missing(record.rating):
+            existing.rating = record.rating
+        if not _is_missing(record.reviews_count):
+            existing.reviews_count = record.reviews_count
+        if not _is_missing(record.price):
+            existing.price = record.price
+        if not _is_missing(record.discount_price):
+            existing.discount_price = record.discount_price
+        if not _is_missing(record.loyal_price):
+            existing.loyal_price = record.loyal_price
+        if not _is_missing(record.price_unit):
+            existing.price_unit = record.price_unit
+        if not _is_missing(record.adult):
+            existing.adult = record.adult
+        if not _is_missing(record.is_new):
+            existing.is_new = record.is_new
+        if not _is_missing(record.promo):
+            existing.promo = record.promo
+        if not _is_missing(record.season):
+            existing.season = record.season
+        if not _is_missing(record.hit):
+            existing.hit = record.hit
+        if not _is_missing(record.data_matrix):
+            existing.data_matrix = record.data_matrix
         existing.unit = record.unit
 
         if not _is_missing(record.available_count):
@@ -1049,6 +1157,7 @@ class CatalogRepository:
             existing.image_urls_json = list(record.image_urls)
             existing.duplicate_image_urls_json = list(record.duplicate_image_urls)
             existing.image_fingerprints_json = list(record.image_fingerprints)
+        existing.source_payload_json = payload
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
 
@@ -1123,18 +1232,63 @@ class CatalogRepository:
         except ValueError:
             return None
 
+    def _source_payload(self, record: NormalizedProductRecord) -> dict[str, Any]:
+        raw_payload = record.source_payload if isinstance(record.source_payload, dict) else {}
+        normalized = self._to_json_safe(raw_payload)
+        return normalized if isinstance(normalized, dict) else {}
+
+    @classmethod
+    def _to_json_safe(cls, value: object) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return cls._to_utc(value).isoformat()
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in value.items():
+                out[str(key)] = cls._to_json_safe(item)
+            return out
+        if isinstance(value, (list, tuple, set)):
+            return [cls._to_json_safe(item) for item in value]
+        return str(value)
+
     def _validate_catalog_products_schema(self) -> None:
         inspector = inspect(self._engine)
         if not inspector.has_table("catalog_products"):
             return
 
         columns = {item["name"] for item in inspector.get_columns("catalog_products")}
-        required = ("primary_category_id", "settlement_id")
+        required = (
+            "primary_category_id",
+            "settlement_id",
+            "price",
+            "discount_price",
+            "loyal_price",
+            "price_unit",
+            "source_payload_json",
+        )
         missing = [name for name in required if name not in columns]
         if missing:
             raise RuntimeError(
                 "Schema mismatch in `catalog_products`: missing columns "
                 f"{', '.join(missing)}. Apply DB migrations before starting converter."
+            )
+
+        if not inspector.has_table("catalog_product_snapshots"):
+            return
+        snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        snapshot_required = (
+            "price",
+            "discount_price",
+            "loyal_price",
+            "price_unit",
+            "source_payload_json",
+        )
+        snapshot_missing = [name for name in snapshot_required if name not in snapshot_columns]
+        if snapshot_missing:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_snapshots`: missing columns "
+                f"{', '.join(snapshot_missing)}. Apply DB migrations before starting converter."
             )
 
     @staticmethod

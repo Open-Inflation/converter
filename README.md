@@ -57,6 +57,11 @@ converter/
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
 `catalog_product_snapshots` не сохраняются.
 
+Converter сохраняет расширенный product-контракт без потерь: в snapshots/current projection
+пишутся цены (`price/discount_price/loyal_price/price_unit`), product-флаги и producer/rating,
+а полный источник из receiver (product/artifact/admin/categories/images/meta/wholesale/category-links)
+доступен в `source_payload_json`.
+
 Политика обновления:
 
 - история не удаляется и не перезаписывается (`append-only snapshots`);

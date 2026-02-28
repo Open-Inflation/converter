@@ -26,6 +26,25 @@ class RawProductRecord:
     available_count: float | None = None
     package_quantity: float | None = None
     package_unit: PackageUnit | None = None
+    price: float | None = None
+    discount_price: float | None = None
+    loyal_price: float | None = None
+    price_unit: str | None = None
+
+    source_page_url: str | None = None
+    description: str | None = None
+    producer_name: str | None = None
+    producer_country: str | None = None
+    expiration_date_in_days: int | None = None
+    rating: float | None = None
+    reviews_count: int | None = None
+
+    adult: bool | None = None
+    is_new: bool | None = None
+    promo: bool | None = None
+    season: bool | None = None
+    hit: bool | None = None
+    data_matrix: bool | None = None
 
     category: str | None = None
     geo: str | None = None
@@ -67,6 +86,25 @@ class NormalizedProductRecord:
     available_count: float | None
     package_quantity: float | None
     package_unit: PackageUnit | None
+    price: float | None = None
+    discount_price: float | None = None
+    loyal_price: float | None = None
+    price_unit: str | None = None
+
+    source_page_url: str | None = None
+    description: str | None = None
+    producer_name: str | None = None
+    producer_country: str | None = None
+    expiration_date_in_days: int | None = None
+    rating: float | None = None
+    reviews_count: int | None = None
+
+    adult: bool | None = None
+    is_new: bool | None = None
+    promo: bool | None = None
+    season: bool | None = None
+    hit: bool | None = None
+    data_matrix: bool | None = None
 
     source_id: str | None = None
     plu: str | None = None

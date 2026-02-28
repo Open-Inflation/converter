@@ -44,13 +44,165 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
+                self.assertIn("price", product_columns)
+                self.assertIn("source_payload_json", product_columns)
                 self.assertNotIn("title_normalized", product_columns)
                 self.assertNotIn("title_original_no_stopwords", product_columns)
 
                 self.assertIn("title_original", snapshot_columns)
                 self.assertIn("title_normalized_no_stopwords", snapshot_columns)
+                self.assertIn("price", snapshot_columns)
+                self.assertIn("source_payload_json", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
                 self.assertNotIn("title_original_no_stopwords", snapshot_columns)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_persists_price_and_source_payload(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed_at = datetime(2026, 2, 28, tzinfo=timezone.utc)
+            payload = {
+                "receiver_product_id": 501,
+                "receiver_product": {
+                    "price": 199.9,
+                    "discount_price": 149.9,
+                    "loyal_price": 129.9,
+                    "price_unit": "RUB",
+                    "description": "Тестовое описание",
+                },
+                "receiver_product_meta": [{"name": "Жирность", "value_text": "2.5%"}],
+            }
+
+            record = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Тест",
+                title_normalized="тест",
+                title_original_no_stopwords="тест",
+                title_normalized_no_stopwords="тест",
+                brand="Brand",
+                unit="PCE",
+                available_count=1.0,
+                package_quantity=None,
+                package_unit=None,
+                price=199.9,
+                discount_price=149.9,
+                loyal_price=129.9,
+                price_unit="RUB",
+                description="Тестовое описание",
+                source_id="receiver:run-price:1",
+                observed_at=observed_at,
+                source_payload=payload,
+            )
+
+            repo.upsert_many([record])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                product = conn.execute(
+                    """
+                    SELECT price, discount_price, loyal_price, price_unit, description, source_payload_json
+                    FROM catalog_products
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-price:1"),
+                ).fetchone()
+                self.assertIsNotNone(product)
+                assert product is not None
+                self.assertAlmostEqual(float(product["price"]), 199.9, places=3)
+                self.assertAlmostEqual(float(product["discount_price"]), 149.9, places=3)
+                self.assertAlmostEqual(float(product["loyal_price"]), 129.9, places=3)
+                self.assertEqual(product["price_unit"], "RUB")
+                self.assertEqual(product["description"], "Тестовое описание")
+                product_payload = (
+                    json.loads(product["source_payload_json"])
+                    if isinstance(product["source_payload_json"], str)
+                    else product["source_payload_json"]
+                )
+                self.assertEqual(product_payload, payload)
+
+                snapshot = conn.execute(
+                    """
+                    SELECT price, discount_price, loyal_price, price_unit, description, source_payload_json
+                    FROM catalog_product_snapshots
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-price:1"),
+                ).fetchone()
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                self.assertAlmostEqual(float(snapshot["price"]), 199.9, places=3)
+                self.assertAlmostEqual(float(snapshot["discount_price"]), 149.9, places=3)
+                self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
+                self.assertEqual(snapshot["price_unit"], "RUB")
+                self.assertEqual(snapshot["description"], "Тестовое описание")
+                snapshot_payload = (
+                    json.loads(snapshot["source_payload_json"])
+                    if isinstance(snapshot["source_payload_json"], str)
+                    else snapshot["source_payload_json"]
+                )
+                self.assertEqual(snapshot_payload, payload)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_serializes_source_payload_datetimes(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed_at = datetime(2026, 2, 28, tzinfo=timezone.utc)
+            payload = {
+                "receiver_run_id": "run-dt",
+                "receiver_artifact": {
+                    "ingested_at": datetime(2026, 2, 28, 12, 30, tzinfo=timezone.utc),
+                },
+            }
+
+            record = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Тест",
+                title_normalized="тест",
+                title_original_no_stopwords="тест",
+                title_normalized_no_stopwords="тест",
+                brand=None,
+                unit="PCE",
+                available_count=None,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-dt:1",
+                observed_at=observed_at,
+                source_payload=payload,
+            )
+
+            repo.upsert_many([record])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                product = conn.execute(
+                    """
+                    SELECT source_payload_json
+                    FROM catalog_products
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-dt:1"),
+                ).fetchone()
+                self.assertIsNotNone(product)
+                assert product is not None
+                stored_payload = (
+                    json.loads(product["source_payload_json"])
+                    if isinstance(product["source_payload_json"], str)
+                    else product["source_payload_json"]
+                )
+                self.assertEqual(
+                    stored_payload["receiver_artifact"]["ingested_at"],
+                    "2026-02-28T12:30:00+00:00",
+                )
             finally:
                 conn.close()
         finally:

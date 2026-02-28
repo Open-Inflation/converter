@@ -24,6 +24,20 @@ class _RunArtifact(_ReceiverBase):
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     parser_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retail_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schedule_weekdays_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_weekdays_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_saturday_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_saturday_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_sunday_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_sunday_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    temporarily_closed: Mapped[bool | None] = mapped_column(nullable=True)
+    longitude: Mapped[float | None] = mapped_column(nullable=True)
+    latitude: Mapped[float | None] = mapped_column(nullable=True)
+    dataclass_validated: Mapped[bool | None] = mapped_column(nullable=True)
+    dataclass_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     ingested_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
@@ -35,10 +49,27 @@ class _RunArtifactProduct(_ReceiverBase):
 
     sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
     plu: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    adult: Mapped[bool | None] = mapped_column(nullable=True)
+    is_new: Mapped[bool | None] = mapped_column(nullable=True)
+    promo: Mapped[bool | None] = mapped_column(nullable=True)
+    season: Mapped[bool | None] = mapped_column(nullable=True)
+    hit: Mapped[bool | None] = mapped_column(nullable=True)
+    data_matrix: Mapped[bool | None] = mapped_column(nullable=True)
     composition: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    producer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    producer_country: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expiration_date_in_days: Mapped[int | None] = mapped_column(nullable=True)
+    rating: Mapped[float | None] = mapped_column(nullable=True)
+    reviews_count: Mapped[int | None] = mapped_column(nullable=True)
+    price: Mapped[float | None] = mapped_column(nullable=True)
+    discount_price: Mapped[float | None] = mapped_column(nullable=True)
+    loyal_price: Mapped[float | None] = mapped_column(nullable=True)
+    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     available_count: Mapped[float | None] = mapped_column(nullable=True)
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
@@ -58,6 +89,9 @@ class _RunArtifactCategory(_ReceiverBase):
     parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    adult: Mapped[bool | None] = mapped_column(nullable=True)
+    icon: Mapped[str | None] = mapped_column(Text, nullable=True)
+    banner: Mapped[str | None] = mapped_column(Text, nullable=True)
     depth: Mapped[int | None] = mapped_column(nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
 
@@ -83,6 +117,38 @@ class _RunArtifactProductImage(_ReceiverBase):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(nullable=False)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_main: Mapped[bool | None] = mapped_column(nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
+
+
+class _RunArtifactProductMeta(_ReceiverBase):
+    __tablename__ = "run_artifact_product_meta"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    value_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
+
+
+class _RunArtifactProductWholesalePrice(_ReceiverBase):
+    __tablename__ = "run_artifact_product_wholesale_prices"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(nullable=False)
+    from_items: Mapped[float | None] = mapped_column(nullable=True)
+    price: Mapped[float | None] = mapped_column(nullable=True)
+    sort_order: Mapped[int | None] = mapped_column(nullable=True)
+
+
+class _RunArtifactProductCategory(_ReceiverBase):
+    __tablename__ = "run_artifact_product_categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(nullable=False)
+    category_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
 
 
@@ -107,6 +173,42 @@ def _as_float(value: Any) -> float | None:
         return float(token)
     except ValueError:
         return None
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+
+    token = _safe_str(value)
+    if token is None:
+        return None
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    token = _safe_str(value)
+    if token is None:
+        return None
+    lowered = token.lower()
+    if lowered in {"1", "true", "yes", "y", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
 
 
 def _as_string_list(value: Any) -> list[str]:
@@ -245,11 +347,41 @@ def map_receiver_row_to_raw_product(
     if not isinstance(receiver_categories, list):
         receiver_categories = []
 
+    receiver_product = row.get("receiver_product")
+    if not isinstance(receiver_product, dict):
+        receiver_product = {}
+
+    receiver_artifact = row.get("receiver_artifact")
+    if not isinstance(receiver_artifact, dict):
+        receiver_artifact = {}
+
+    receiver_admin = row.get("receiver_admin_unit")
+    if not isinstance(receiver_admin, dict):
+        receiver_admin = {}
+
+    receiver_product_images = row.get("receiver_product_images")
+    if not isinstance(receiver_product_images, list):
+        receiver_product_images = []
+
+    receiver_product_meta = row.get("receiver_product_meta")
+    if not isinstance(receiver_product_meta, list):
+        receiver_product_meta = []
+
+    receiver_product_wholesale_prices = row.get("receiver_product_wholesale_prices")
+    if not isinstance(receiver_product_wholesale_prices, list):
+        receiver_product_wholesale_prices = []
+
+    receiver_product_categories = row.get("receiver_product_categories")
+    if not isinstance(receiver_product_categories, list):
+        receiver_product_categories = []
+
     payload = {
         "receiver_product_id": row.get("product_id"),
         "receiver_artifact_id": row.get("artifact_id"),
         "receiver_run_id": run_id,
+        "receiver_parser_name": _safe_str(row.get("parser_name")),
         "receiver_source": _safe_str(row.get("artifact_source")),
+        "receiver_ingested_at": _safe_str(row.get("ingested_at")),
         "receiver_sort_order": row.get("product_sort_order"),
         "receiver_categories_uid": category_uids,
         "receiver_categories": receiver_categories,
@@ -260,6 +392,13 @@ def map_receiver_row_to_raw_product(
         "receiver_geo_alias": _safe_str(row.get("geo_alias")),
         "receiver_geo_longitude": _as_float(row.get("geo_longitude")),
         "receiver_geo_latitude": _as_float(row.get("geo_latitude")),
+        "receiver_product": receiver_product,
+        "receiver_artifact": receiver_artifact,
+        "receiver_admin_unit": receiver_admin,
+        "receiver_product_images": receiver_product_images,
+        "receiver_product_meta": receiver_product_meta,
+        "receiver_product_wholesale_prices": receiver_product_wholesale_prices,
+        "receiver_product_categories": receiver_product_categories,
     }
 
     return RawProductRecord(
@@ -273,6 +412,23 @@ def map_receiver_row_to_raw_product(
         available_count=_as_float(row.get("product_available_count")),
         package_quantity=_as_float(row.get("product_package_quantity")),
         package_unit=_normalize_package_unit(row.get("product_package_unit")),
+        price=_as_float(row.get("product_price")),
+        discount_price=_as_float(row.get("product_discount_price")),
+        loyal_price=_as_float(row.get("product_loyal_price")),
+        price_unit=_safe_str(row.get("product_price_unit")),
+        source_page_url=_safe_str(row.get("product_source_page_url")),
+        description=_safe_str(row.get("product_description")),
+        producer_name=_safe_str(row.get("product_producer_name")),
+        producer_country=_safe_str(row.get("product_producer_country")),
+        expiration_date_in_days=_as_int(row.get("product_expiration_date_in_days")),
+        rating=_as_float(row.get("product_rating")),
+        reviews_count=_as_int(row.get("product_reviews_count")),
+        adult=_as_bool(row.get("product_adult")),
+        is_new=_as_bool(row.get("product_is_new")),
+        promo=_as_bool(row.get("product_promo")),
+        season=_as_bool(row.get("product_season")),
+        hit=_as_bool(row.get("product_hit")),
+        data_matrix=_as_bool(row.get("product_data_matrix")),
         category=category,
         geo=geo,
         composition=_safe_str(row.get("product_composition")),
@@ -371,6 +527,10 @@ class ReceiverRepository:
 
             category_lookup = self._load_category_lookup(session, artifact_ids)
             image_lookup = self._load_image_lookup(session, product_ids)
+            image_details_lookup = self._load_image_details_lookup(session, product_ids)
+            meta_lookup = self._load_product_meta_lookup(session, product_ids)
+            wholesale_lookup = self._load_product_wholesale_lookup(session, product_ids)
+            product_category_lookup = self._load_product_category_lookup(session, product_ids)
 
             out: list[RawProductRecord] = []
             for product, artifact, admin in rows:
@@ -379,9 +539,26 @@ class ReceiverRepository:
                     "artifact_id": product.artifact_id,
                     "product_sku": product.sku,
                     "product_plu": product.plu,
+                    "product_source_page_url": product.source_page_url,
                     "product_title": product.title,
+                    "product_description": product.description,
+                    "product_adult": product.adult,
+                    "product_is_new": product.is_new,
+                    "product_promo": product.promo,
+                    "product_season": product.season,
+                    "product_hit": product.hit,
+                    "product_data_matrix": product.data_matrix,
                     "product_composition": product.composition,
                     "product_brand": product.brand,
+                    "product_producer_name": product.producer_name,
+                    "product_producer_country": product.producer_country,
+                    "product_expiration_date_in_days": product.expiration_date_in_days,
+                    "product_rating": product.rating,
+                    "product_reviews_count": product.reviews_count,
+                    "product_price": product.price,
+                    "product_discount_price": product.discount_price,
+                    "product_loyal_price": product.loyal_price,
+                    "product_price_unit": product.price_unit,
                     "product_unit": product.unit,
                     "product_available_count": product.available_count,
                     "product_package_quantity": product.package_quantity,
@@ -393,6 +570,20 @@ class ReceiverRepository:
                     "artifact_source": artifact.source,
                     "ingested_at": artifact.ingested_at,
                     "parser_name": artifact.parser_name,
+                    "artifact_retail_type": artifact.retail_type,
+                    "artifact_code": artifact.code,
+                    "artifact_address": artifact.address,
+                    "artifact_schedule_weekdays_open_from": artifact.schedule_weekdays_open_from,
+                    "artifact_schedule_weekdays_closed_from": artifact.schedule_weekdays_closed_from,
+                    "artifact_schedule_saturday_open_from": artifact.schedule_saturday_open_from,
+                    "artifact_schedule_saturday_closed_from": artifact.schedule_saturday_closed_from,
+                    "artifact_schedule_sunday_open_from": artifact.schedule_sunday_open_from,
+                    "artifact_schedule_sunday_closed_from": artifact.schedule_sunday_closed_from,
+                    "artifact_temporarily_closed": artifact.temporarily_closed,
+                    "artifact_longitude": artifact.longitude,
+                    "artifact_latitude": artifact.latitude,
+                    "artifact_dataclass_validated": artifact.dataclass_validated,
+                    "artifact_dataclass_validation_error": artifact.dataclass_validation_error,
                     "geo_settlement_type": admin.settlement_type if admin else None,
                     "geo_name": admin.name if admin else None,
                     "geo_alias": admin.alias if admin else None,
@@ -412,6 +603,75 @@ class ReceiverRepository:
                     category_lookup.get(product.artifact_id, {}),
                 )
                 row_data["image_urls_json"] = image_lookup.get(product.id, [])
+                row_data["receiver_product_images"] = image_details_lookup.get(product.id, [])
+                row_data["receiver_product_meta"] = meta_lookup.get(product.id, [])
+                row_data["receiver_product_wholesale_prices"] = wholesale_lookup.get(product.id, [])
+                row_data["receiver_product_categories"] = product_category_lookup.get(product.id, [])
+                row_data["receiver_product"] = {
+                    "id": product.id,
+                    "artifact_id": product.artifact_id,
+                    "sku": product.sku,
+                    "plu": product.plu,
+                    "source_page_url": product.source_page_url,
+                    "title": product.title,
+                    "description": product.description,
+                    "adult": product.adult,
+                    "is_new": product.is_new,
+                    "promo": product.promo,
+                    "season": product.season,
+                    "hit": product.hit,
+                    "data_matrix": product.data_matrix,
+                    "brand": product.brand,
+                    "producer_name": product.producer_name,
+                    "producer_country": product.producer_country,
+                    "composition": product.composition,
+                    "expiration_date_in_days": product.expiration_date_in_days,
+                    "rating": product.rating,
+                    "reviews_count": product.reviews_count,
+                    "price": product.price,
+                    "discount_price": product.discount_price,
+                    "loyal_price": product.loyal_price,
+                    "price_unit": product.price_unit,
+                    "unit": product.unit,
+                    "available_count": product.available_count,
+                    "package_quantity": product.package_quantity,
+                    "package_unit": product.package_unit,
+                    "categories_uid_json": _as_string_list(product.categories_uid_json),
+                    "main_image": product.main_image,
+                    "sort_order": product.sort_order,
+                }
+                row_data["receiver_artifact"] = {
+                    "id": artifact.id,
+                    "run_id": artifact.run_id,
+                    "source": artifact.source,
+                    "parser_name": artifact.parser_name,
+                    "retail_type": artifact.retail_type,
+                    "code": artifact.code,
+                    "address": artifact.address,
+                    "schedule_weekdays_open_from": artifact.schedule_weekdays_open_from,
+                    "schedule_weekdays_closed_from": artifact.schedule_weekdays_closed_from,
+                    "schedule_saturday_open_from": artifact.schedule_saturday_open_from,
+                    "schedule_saturday_closed_from": artifact.schedule_saturday_closed_from,
+                    "schedule_sunday_open_from": artifact.schedule_sunday_open_from,
+                    "schedule_sunday_closed_from": artifact.schedule_sunday_closed_from,
+                    "temporarily_closed": artifact.temporarily_closed,
+                    "longitude": artifact.longitude,
+                    "latitude": artifact.latitude,
+                    "dataclass_validated": artifact.dataclass_validated,
+                    "dataclass_validation_error": artifact.dataclass_validation_error,
+                    "ingested_at": artifact.ingested_at,
+                }
+                row_data["receiver_admin_unit"] = {
+                    "id": admin.id if admin else None,
+                    "artifact_id": admin.artifact_id if admin else None,
+                    "settlement_type": admin.settlement_type if admin else None,
+                    "name": admin.name if admin else None,
+                    "alias": admin.alias if admin else None,
+                    "region": admin.region if admin else None,
+                    "country": admin.country if admin else None,
+                    "longitude": admin.longitude if admin else None,
+                    "latitude": admin.latitude if admin else None,
+                }
 
                 parsed = map_receiver_row_to_raw_product(
                     row_data,
@@ -427,12 +687,89 @@ class ReceiverRepository:
         inspector = inspect(self._engine)
         if not inspector.has_table("run_artifacts"):
             raise RuntimeError("Receiver schema is missing table run_artifacts")
+        if not inspector.has_table("run_artifact_products"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_products")
+        if not inspector.has_table("run_artifact_categories"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_categories")
+        if not inspector.has_table("run_artifact_administrative_units"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_administrative_units")
+        if not inspector.has_table("run_artifact_product_images"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_product_images")
+        if not inspector.has_table("run_artifact_product_meta"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_product_meta")
+        if not inspector.has_table("run_artifact_product_wholesale_prices"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_product_wholesale_prices")
+        if not inspector.has_table("run_artifact_product_categories"):
+            raise RuntimeError("Receiver schema is missing table run_artifact_product_categories")
 
         columns = {item["name"] for item in inspector.get_columns("run_artifacts")}
         if "parser_name" not in columns:
             raise RuntimeError(
                 "Unsupported receiver schema: run_artifacts.parser_name is missing. "
                 "Apply receiver manual migrations from 2026-02-26."
+            )
+        required_artifact = {
+            "retail_type",
+            "code",
+            "address",
+            "schedule_weekdays_open_from",
+            "schedule_weekdays_closed_from",
+            "schedule_saturday_open_from",
+            "schedule_saturday_closed_from",
+            "schedule_sunday_open_from",
+            "schedule_sunday_closed_from",
+            "temporarily_closed",
+            "longitude",
+            "latitude",
+            "dataclass_validated",
+            "dataclass_validation_error",
+        }
+        missing_artifact = sorted(required_artifact - columns)
+        if missing_artifact:
+            raise RuntimeError(
+                "Unsupported receiver schema: run_artifacts is missing columns "
+                f"{', '.join(missing_artifact)}"
+            )
+
+        product_columns = {item["name"] for item in inspector.get_columns("run_artifact_products")}
+        required_product = {
+            "source_page_url",
+            "description",
+            "adult",
+            "is_new",
+            "promo",
+            "season",
+            "hit",
+            "data_matrix",
+            "producer_name",
+            "producer_country",
+            "expiration_date_in_days",
+            "rating",
+            "reviews_count",
+            "price",
+            "discount_price",
+            "loyal_price",
+            "price_unit",
+        }
+        missing_product = sorted(required_product - product_columns)
+        if missing_product:
+            raise RuntimeError(
+                "Unsupported receiver schema: run_artifact_products is missing columns "
+                f"{', '.join(missing_product)}"
+            )
+
+        category_columns = {item["name"] for item in inspector.get_columns("run_artifact_categories")}
+        missing_category = sorted({"adult", "icon", "banner"} - category_columns)
+        if missing_category:
+            raise RuntimeError(
+                "Unsupported receiver schema: run_artifact_categories is missing columns "
+                f"{', '.join(missing_category)}"
+            )
+
+        image_columns = {item["name"] for item in inspector.get_columns("run_artifact_product_images")}
+        if "is_main" not in image_columns:
+            raise RuntimeError(
+                "Unsupported receiver schema: run_artifact_product_images is missing column is_main"
             )
 
     def _load_category_lookup(
@@ -444,26 +781,34 @@ class ReceiverRepository:
             return {}
 
         stmt = select(
+            _RunArtifactCategory.id,
             _RunArtifactCategory.artifact_id,
             _RunArtifactCategory.uid,
             _RunArtifactCategory.parent_uid,
             _RunArtifactCategory.alias,
             _RunArtifactCategory.title,
+            _RunArtifactCategory.adult,
+            _RunArtifactCategory.icon,
+            _RunArtifactCategory.banner,
             _RunArtifactCategory.depth,
             _RunArtifactCategory.sort_order,
         ).where(_RunArtifactCategory.artifact_id.in_(artifact_ids))
 
         out: dict[int, dict[str, dict[str, Any]]] = {}
-        for artifact_id, uid, parent_uid, alias, title, depth, sort_order in session.execute(stmt):
+        for category_id, artifact_id, uid, parent_uid, alias, title, adult, icon, banner, depth, sort_order in session.execute(stmt):
             u = _safe_str(uid)
-            t = _safe_str(title)
-            if u is None or t is None:
+            if u is None:
                 continue
             out.setdefault(int(artifact_id), {})[u] = {
+                "id": int(category_id),
+                "artifact_id": int(artifact_id),
                 "uid": u,
                 "parent_uid": _safe_str(parent_uid),
                 "alias": _safe_str(alias),
-                "title": t,
+                "title": _safe_str(title),
+                "adult": _as_bool(adult),
+                "icon": _safe_str(icon),
+                "banner": _safe_str(banner),
                 "depth": int(depth) if isinstance(depth, int) else None,
                 "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
             }
@@ -489,6 +834,125 @@ class ReceiverRepository:
             if token not in bucket:
                 bucket.append(token)
 
+        return out
+
+    def _load_image_details_lookup(self, session: Session, product_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        if not product_ids:
+            return {}
+
+        stmt = (
+            select(
+                _RunArtifactProductImage.product_id,
+                _RunArtifactProductImage.id,
+                _RunArtifactProductImage.url,
+                _RunArtifactProductImage.is_main,
+                _RunArtifactProductImage.sort_order,
+            )
+            .where(_RunArtifactProductImage.product_id.in_(product_ids))
+            .order_by(_RunArtifactProductImage.product_id.asc(), _RunArtifactProductImage.sort_order.asc())
+        )
+
+        out: dict[int, list[dict[str, Any]]] = {}
+        for product_id, image_id, url, is_main, sort_order in session.execute(stmt):
+            out.setdefault(int(product_id), []).append(
+                {
+                    "id": int(image_id),
+                    "product_id": int(product_id),
+                    "url": _safe_str(url),
+                    "is_main": _as_bool(is_main),
+                    "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
+                }
+            )
+
+        return out
+
+    def _load_product_meta_lookup(self, session: Session, product_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        if not product_ids:
+            return {}
+
+        stmt = (
+            select(
+                _RunArtifactProductMeta.product_id,
+                _RunArtifactProductMeta.id,
+                _RunArtifactProductMeta.name,
+                _RunArtifactProductMeta.alias,
+                _RunArtifactProductMeta.value_type,
+                _RunArtifactProductMeta.value_text,
+                _RunArtifactProductMeta.sort_order,
+            )
+            .where(_RunArtifactProductMeta.product_id.in_(product_ids))
+            .order_by(_RunArtifactProductMeta.product_id.asc(), _RunArtifactProductMeta.sort_order.asc())
+        )
+
+        out: dict[int, list[dict[str, Any]]] = {}
+        for product_id, meta_id, name, alias, value_type, value_text, sort_order in session.execute(stmt):
+            out.setdefault(int(product_id), []).append(
+                {
+                    "id": int(meta_id),
+                    "product_id": int(product_id),
+                    "name": _safe_str(name),
+                    "alias": _safe_str(alias),
+                    "value_type": _safe_str(value_type),
+                    "value_text": _safe_str(value_text),
+                    "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
+                }
+            )
+        return out
+
+    def _load_product_wholesale_lookup(self, session: Session, product_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        if not product_ids:
+            return {}
+
+        stmt = (
+            select(
+                _RunArtifactProductWholesalePrice.product_id,
+                _RunArtifactProductWholesalePrice.id,
+                _RunArtifactProductWholesalePrice.from_items,
+                _RunArtifactProductWholesalePrice.price,
+                _RunArtifactProductWholesalePrice.sort_order,
+            )
+            .where(_RunArtifactProductWholesalePrice.product_id.in_(product_ids))
+            .order_by(_RunArtifactProductWholesalePrice.product_id.asc(), _RunArtifactProductWholesalePrice.sort_order.asc())
+        )
+
+        out: dict[int, list[dict[str, Any]]] = {}
+        for product_id, wholesale_id, from_items, price, sort_order in session.execute(stmt):
+            out.setdefault(int(product_id), []).append(
+                {
+                    "id": int(wholesale_id),
+                    "product_id": int(product_id),
+                    "from_items": _as_float(from_items),
+                    "price": _as_float(price),
+                    "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
+                }
+            )
+        return out
+
+    def _load_product_category_lookup(self, session: Session, product_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
+        if not product_ids:
+            return {}
+
+        stmt = (
+            select(
+                _RunArtifactProductCategory.product_id,
+                _RunArtifactProductCategory.id,
+                _RunArtifactProductCategory.category_uid,
+                _RunArtifactProductCategory.sort_order,
+            )
+            .where(_RunArtifactProductCategory.product_id.in_(product_ids))
+            .order_by(_RunArtifactProductCategory.product_id.asc(), _RunArtifactProductCategory.sort_order.asc())
+        )
+
+        out: dict[int, list[dict[str, Any]]] = {}
+        for product_id, link_id, category_uid, sort_order in session.execute(stmt):
+            out.setdefault(int(product_id), []).append(
+                {
+                    "id": int(link_id),
+                    "product_id": int(product_id),
+                    "category_uid": _safe_str(category_uid),
+                    "sort_order": int(sort_order) if isinstance(sort_order, int) else None,
+                }
+            )
         return out
 
     @staticmethod
@@ -526,8 +990,13 @@ class ReceiverRepository:
             if not isinstance(entry, dict):
                 out.append(
                     {
+                        "id": None,
+                        "artifact_id": None,
                         "uid": uid,
                         "title": None,
+                        "adult": None,
+                        "icon": None,
+                        "banner": None,
                         "sort_order": idx,
                     }
                 )
@@ -535,10 +1004,15 @@ class ReceiverRepository:
 
             out.append(
                 {
+                    "id": entry.get("id") if isinstance(entry.get("id"), int) else None,
+                    "artifact_id": entry.get("artifact_id") if isinstance(entry.get("artifact_id"), int) else None,
                     "uid": _safe_str(entry.get("uid")) or uid,
                     "parent_uid": _safe_str(entry.get("parent_uid")),
                     "alias": _safe_str(entry.get("alias")),
                     "title": _safe_str(entry.get("title")),
+                    "adult": _as_bool(entry.get("adult")),
+                    "icon": _safe_str(entry.get("icon")),
+                    "banner": _safe_str(entry.get("banner")),
                     "depth": entry.get("depth") if isinstance(entry.get("depth"), int) else None,
                     "sort_order": entry.get("sort_order") if isinstance(entry.get("sort_order"), int) else idx,
                 }
