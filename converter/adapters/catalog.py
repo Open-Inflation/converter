@@ -76,7 +76,6 @@ class _CatalogProduct(_CatalogBase):
     plu: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    raw_title: Mapped[str] = mapped_column(Text, nullable=False)
     title_original: Mapped[str] = mapped_column(Text, nullable=False)
     title_normalized: Mapped[str] = mapped_column(Text, nullable=False)
     title_original_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
@@ -92,7 +91,6 @@ class _CatalogProduct(_CatalogBase):
     primary_category_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
-    composition_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
@@ -100,7 +98,6 @@ class _CatalogProduct(_CatalogBase):
     image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    raw_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -120,7 +117,6 @@ class _CatalogProductSnapshot(_CatalogBase):
     receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     receiver_sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    raw_title: Mapped[str] = mapped_column(Text, nullable=False)
     title_original: Mapped[str] = mapped_column(Text, nullable=False)
     title_normalized: Mapped[str] = mapped_column(Text, nullable=False)
     title_original_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
@@ -133,13 +129,10 @@ class _CatalogProductSnapshot(_CatalogBase):
     package_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    category_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     category_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    geo_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     geo_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    composition_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -149,7 +142,6 @@ class _CatalogProductSnapshot(_CatalogBase):
     image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    raw_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
@@ -174,13 +166,13 @@ class _CatalogSettlement(_CatalogBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     geo_key: Mapped[str] = mapped_column(String(191), nullable=False, unique=True)
 
-    country_raw: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(64), nullable=True)
     country_normalized: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    region_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    region: Mapped[str | None] = mapped_column(Text, nullable=True)
     region_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    name_raw: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     name_normalized: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     settlement_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -206,7 +198,8 @@ class _CatalogSettlementGeodata(_CatalogBase):
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    raw_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receiver_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -221,7 +214,7 @@ class _CatalogCategory(_CatalogBase):
     source_uid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     parent_source_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    title_raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
     alias: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -611,7 +604,7 @@ class CatalogRepository:
         settlement: _CatalogSettlement | None,
     ) -> _CatalogProductSnapshot:
         now = _utc_now()
-        payload = dict(record.raw_payload) if isinstance(record.raw_payload, dict) else {}
+        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
 
         snapshot = _CatalogProductSnapshot(
             canonical_product_id=record.canonical_product_id or str(uuid4()),
@@ -621,7 +614,6 @@ class CatalogRepository:
             receiver_product_id=self._to_int(payload.get("receiver_product_id")),
             receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
             receiver_sort_order=self._to_int(payload.get("receiver_sort_order")),
-            raw_title=record.raw_title,
             title_original=record.title_original,
             title_normalized=record.title_normalized,
             title_original_no_stopwords=record.title_original_no_stopwords,
@@ -631,18 +623,14 @@ class CatalogRepository:
             available_count=record.available_count,
             package_quantity=record.package_quantity,
             package_unit=record.package_unit,
-            category_raw=record.category_raw,
             category_normalized=record.category_normalized,
-            geo_raw=record.geo_raw,
             geo_normalized=record.geo_normalized,
-            composition_raw=record.composition_raw,
             composition_normalized=record.composition_normalized,
             settlement_id=settlement.id if settlement is not None else None,
             image_urls_json=list(record.image_urls),
             duplicate_image_urls_json=list(record.duplicate_image_urls),
             image_fingerprints_json=list(record.image_fingerprints),
             observed_at=self._to_utc(record.observed_at),
-            raw_payload_json=payload,
             created_at=now,
         )
         session.add(snapshot)
@@ -704,11 +692,11 @@ class CatalogRepository:
         if row is None:
             row = _CatalogSettlement(
                 geo_key=key,
-                country_raw=geo.get("country_raw"),
+                country=geo.get("country"),
                 country_normalized=geo.get("country_normalized"),
-                region_raw=geo.get("region_raw"),
+                region=geo.get("region"),
                 region_normalized=geo.get("region_normalized"),
-                name_raw=geo.get("name_raw"),
+                name=geo.get("name"),
                 name_normalized=geo.get("name_normalized"),
                 settlement_type=geo.get("settlement_type"),
                 alias=geo.get("alias"),
@@ -725,11 +713,11 @@ class CatalogRepository:
         row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
         row.updated_at = now
 
-        self._fill_missing(row, "country_raw", geo.get("country_raw"))
+        self._fill_missing(row, "country", geo.get("country"))
         self._fill_missing(row, "country_normalized", geo.get("country_normalized"))
-        self._fill_missing(row, "region_raw", geo.get("region_raw"))
+        self._fill_missing(row, "region", geo.get("region"))
         self._fill_missing(row, "region_normalized", geo.get("region_normalized"))
-        self._fill_missing(row, "name_raw", geo.get("name_raw"))
+        self._fill_missing(row, "name", geo.get("name"))
         self._fill_missing(row, "name_normalized", geo.get("name_normalized"))
         self._fill_missing(row, "settlement_type", geo.get("settlement_type"))
         self._fill_missing(row, "alias", geo.get("alias"))
@@ -748,7 +736,7 @@ class CatalogRepository:
         if settlement is None or settlement.id is None:
             return
 
-        payload = dict(record.raw_payload) if isinstance(record.raw_payload, dict) else {}
+        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
         latitude = _as_float(payload.get("receiver_geo_latitude"))
         longitude = _as_float(payload.get("receiver_geo_longitude"))
         if latitude is None or longitude is None:
@@ -774,11 +762,8 @@ class CatalogRepository:
             longitude=longitude,
             observed_at=self._to_utc(record.observed_at),
             source_run_id=_safe_str(payload.get("receiver_run_id")),
-            raw_payload_json={
-                "receiver_run_id": _safe_str(payload.get("receiver_run_id")),
-                "receiver_artifact_id": self._to_int(payload.get("receiver_artifact_id")),
-                "receiver_product_id": self._to_int(payload.get("receiver_product_id")),
-            },
+            receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
+            receiver_product_id=self._to_int(payload.get("receiver_product_id")),
             created_at=_utc_now(),
         )
         session.add(row)
@@ -799,8 +784,8 @@ class CatalogRepository:
         out: list[tuple[_CatalogCategory, int]] = []
         for idx, item in enumerate(candidates):
             source_uid = _safe_str(item.get("uid"))
-            title_raw = _safe_str(item.get("title"))
-            title_normalized = self._normalize_text(title_raw)
+            title = _safe_str(item.get("title"))
+            title_normalized = self._normalize_text(title)
 
             category_key = self._category_key(
                 parser_name=parser_name,
@@ -817,7 +802,7 @@ class CatalogRepository:
                     parser_name=parser_name,
                     source_uid=source_uid,
                     parent_source_uid=_safe_str(item.get("parent_uid")),
-                    title_raw=title_raw,
+                    title=title,
                     title_normalized=title_normalized,
                     alias=_safe_str(item.get("alias")),
                     depth=self._to_int(item.get("depth")),
@@ -832,7 +817,7 @@ class CatalogRepository:
                 row.updated_at = now
                 self._fill_missing(row, "source_uid", source_uid)
                 self._fill_missing(row, "parent_source_uid", _safe_str(item.get("parent_uid")))
-                self._fill_missing(row, "title_raw", title_raw)
+                self._fill_missing(row, "title", title)
                 self._fill_missing(row, "title_normalized", title_normalized)
                 self._fill_missing(row, "alias", _safe_str(item.get("alias")))
                 self._fill_missing(row, "depth", self._to_int(item.get("depth")))
@@ -880,38 +865,38 @@ class CatalogRepository:
                     link.is_primary = True
 
     def _extract_geo_components(self, record: NormalizedProductRecord) -> dict[str, object] | None:
-        payload = dict(record.raw_payload) if isinstance(record.raw_payload, dict) else {}
+        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
 
-        country_raw = _safe_str(payload.get("receiver_geo_country"))
-        region_raw = _safe_str(payload.get("receiver_geo_region"))
-        name_raw = _safe_str(payload.get("receiver_geo_name"))
+        country = _safe_str(payload.get("receiver_geo_country"))
+        region = _safe_str(payload.get("receiver_geo_region"))
+        name = _safe_str(payload.get("receiver_geo_name"))
         settlement_type = _safe_str(payload.get("receiver_geo_settlement_type"))
         alias = _safe_str(payload.get("receiver_geo_alias"))
         latitude = _as_float(payload.get("receiver_geo_latitude"))
         longitude = _as_float(payload.get("receiver_geo_longitude"))
 
-        if name_raw is None and record.geo_raw:
-            parts = [segment.strip() for segment in str(record.geo_raw).split(",") if segment.strip()]
-            if len(parts) >= 1 and country_raw is None:
-                country_raw = parts[0]
-            if len(parts) >= 2 and region_raw is None:
-                region_raw = parts[1]
-            if len(parts) >= 3 and name_raw is None:
-                name_raw = parts[2]
+        if name is None and record.geo_normalized:
+            parts = [segment.strip() for segment in str(record.geo_normalized).split(",") if segment.strip()]
+            if len(parts) >= 1 and country is None:
+                country = parts[0]
+            if len(parts) >= 2 and region is None:
+                region = parts[1]
+            if len(parts) >= 3 and name is None:
+                name = parts[2]
 
-        country_normalized = self._normalize_text(country_raw)
-        region_normalized = self._normalize_text(region_raw)
-        name_normalized = self._normalize_text(name_raw)
+        country_normalized = self._normalize_text(country)
+        region_normalized = self._normalize_text(region)
+        name_normalized = self._normalize_text(name)
 
         if all(token is None for token in (country_normalized, region_normalized, name_normalized)):
             return None
 
         return {
-            "country_raw": country_raw,
+            "country": country,
             "country_normalized": country_normalized,
-            "region_raw": region_raw,
+            "region": region,
             "region_normalized": region_normalized,
-            "name_raw": name_raw,
+            "name": name,
             "name_normalized": name_normalized,
             "settlement_type": settlement_type,
             "alias": alias,
@@ -920,7 +905,7 @@ class CatalogRepository:
         }
 
     def _extract_category_candidates(self, record: NormalizedProductRecord) -> list[dict[str, object]]:
-        payload = dict(record.raw_payload) if isinstance(record.raw_payload, dict) else {}
+        payload = dict(record.source_payload) if isinstance(record.source_payload, dict) else {}
         raw = payload.get("receiver_categories")
 
         out: list[dict[str, object]] = []
@@ -940,11 +925,11 @@ class CatalogRepository:
         if out:
             return out
 
-        category_raw = _safe_str(record.category_raw)
-        if category_raw is None:
+        category_normalized = _safe_str(record.category_normalized)
+        if category_normalized is None:
             return []
 
-        parts = [segment.strip() for segment in category_raw.split("/") if segment.strip()]
+        parts = [segment.strip() for segment in category_normalized.split("/") if segment.strip()]
         return [{"title": title, "sort_order": idx} for idx, title in enumerate(parts)]
 
     @staticmethod
@@ -1016,7 +1001,6 @@ class CatalogRepository:
                 canonical_product_id=record.canonical_product_id or str(uuid4()),
                 plu=record.plu,
                 sku=record.sku,
-                raw_title=record.raw_title,
                 title_original=record.title_original,
                 title_normalized=record.title_normalized,
                 title_original_no_stopwords=record.title_original_no_stopwords,
@@ -1028,13 +1012,11 @@ class CatalogRepository:
                 package_unit=record.package_unit,
                 primary_category_id=primary_category_id,
                 settlement_id=settlement_id,
-                composition_raw=record.composition_raw,
                 composition_normalized=record.composition_normalized,
                 image_urls_json=list(record.image_urls),
                 duplicate_image_urls_json=list(record.duplicate_image_urls),
                 image_fingerprints_json=list(record.image_fingerprints),
                 observed_at=self._to_utc(record.observed_at),
-                raw_payload_json=dict(record.raw_payload),
             )
             session.add(existing)
             return
@@ -1049,7 +1031,6 @@ class CatalogRepository:
             existing.sku = record.sku
 
         # title fields are authoritative per source snapshot
-        existing.raw_title = record.raw_title
         existing.title_original = record.title_original
         existing.title_normalized = record.title_normalized
         existing.title_original_no_stopwords = record.title_original_no_stopwords
@@ -1071,8 +1052,6 @@ class CatalogRepository:
         if settlement_id is not None:
             existing.settlement_id = settlement_id
 
-        if not _is_missing(record.composition_raw):
-            existing.composition_raw = record.composition_raw
         if not _is_missing(record.composition_normalized):
             existing.composition_normalized = record.composition_normalized
 
@@ -1082,7 +1061,6 @@ class CatalogRepository:
             existing.image_fingerprints_json = list(record.image_fingerprints)
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
-        existing.raw_payload_json = self._merge_payload(existing.raw_payload_json, record.raw_payload)
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
@@ -1098,13 +1076,6 @@ class CatalogRepository:
         current = getattr(target, field_name)
         if _is_missing(current):
             setattr(target, field_name, value)
-
-    @staticmethod
-    def _merge_payload(existing: object, incoming: object) -> dict[str, Any]:
-        base = dict(existing) if isinstance(existing, dict) else {}
-        if isinstance(incoming, dict):
-            base.update(incoming)
-        return base
 
     @staticmethod
     def _normalize_text(value: str | None) -> str | None:

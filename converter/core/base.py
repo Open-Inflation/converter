@@ -28,7 +28,6 @@ class BaseParserHandler(ABC):
 
         return NormalizedProductRecord(
             parser_name=self.parser_name,
-            raw_title=title.raw_title,
             title_original=title.name_original,
             title_normalized=title.name_normalized,
             title_original_no_stopwords=title.original_name_no_stopwords,
@@ -41,15 +40,12 @@ class BaseParserHandler(ABC):
             source_id=raw.source_id,
             plu=raw.plu,
             sku=raw.sku,
-            category_raw=raw.category,
             category_normalized=self.normalize_category(raw.category),
-            geo_raw=raw.geo,
             geo_normalized=self.normalize_geo(raw.geo),
-            composition_raw=raw.composition,
             composition_normalized=self.normalize_composition(raw.composition),
             image_urls=list(raw.image_urls),
             observed_at=raw.observed_at,
-            raw_payload=dict(raw.payload),
+            source_payload=dict(raw.payload),
         )
 
     @abstractmethod

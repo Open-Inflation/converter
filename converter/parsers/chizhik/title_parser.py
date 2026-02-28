@@ -141,7 +141,7 @@ class ChizhikTitleParser:
         normalized_without_stopwords = self._normalizer.remove_stopwords(name_normalized)
 
         return TitleNormalizationResult(
-            raw_title=raw,
+            title=raw,
             name_original=name_original,
             brand=brand,
             name_normalized=name_normalized,

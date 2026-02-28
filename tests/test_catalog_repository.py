@@ -139,7 +139,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
             first = NormalizedProductRecord(
                 parser_name="fixprice",
-                raw_title="Тарелка десертная O`Kit",
                 title_original="Тарелка десертная O`Kit",
                 title_normalized="тарелка десертный o kit",
                 title_original_no_stopwords="тарелка десертная o kit",
@@ -155,7 +154,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             )
             second = NormalizedProductRecord(
                 parser_name="fixprice",
-                raw_title="Тарелка десертная O`Kit, 2",
                 title_original="Тарелка десертная O`Kit",
                 title_normalized="тарелка десертный o kit",
                 title_original_no_stopwords="тарелка десертная o kit",
@@ -241,12 +239,12 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT name_raw, region_raw, country_raw, latitude, longitude FROM catalog_settlements"
+                    "SELECT name, region, country, latitude, longitude FROM catalog_settlements"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
-                self.assertEqual(settlement["name_raw"], "Санкт-Петербург")
-                self.assertEqual(settlement["region_raw"], "Ленинградская область")
-                self.assertEqual(settlement["country_raw"], "RUS")
+                self.assertEqual(settlement["name"], "Санкт-Петербург")
+                self.assertEqual(settlement["region"], "Ленинградская область")
+                self.assertEqual(settlement["country"], "RUS")
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
 
@@ -254,7 +252,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(int(geo_rows["cnt"]), 1)
 
                 category_rows = conn.execute(
-                    "SELECT source_uid, title_raw, depth FROM catalog_categories ORDER BY depth ASC"
+                    "SELECT source_uid, title, depth FROM catalog_categories ORDER BY depth ASC"
                 ).fetchall()
                 self.assertEqual(len(category_rows), 2)
                 self.assertEqual(category_rows[0]["source_uid"], "cat-root")
@@ -275,7 +273,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
             record = NormalizedProductRecord(
                 parser_name="fixprice",
-                raw_title="Тест",
                 title_original="Тест",
                 title_normalized="тест",
                 title_original_no_stopwords="тест",
@@ -308,7 +305,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
             first = NormalizedProductRecord(
                 parser_name="fixprice",
-                raw_title="Набор ложек",
                 title_original="Набор ложек",
                 title_normalized="набор ложка",
                 title_original_no_stopwords="набор ложек",
@@ -320,18 +316,14 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 package_unit=None,
                 source_id="receiver:run-null:1",
                 sku="null-1",
-                category_raw="Посуда",
                 category_normalized="посуда",
-                geo_raw="RUS, Москва",
                 geo_normalized="rus, москва",
-                composition_raw="Сталь",
                 composition_normalized="сталь",
                 image_urls=["https://cdn.example/spoons.jpg"],
                 observed_at=observed,
             )
             second = NormalizedProductRecord(
                 parser_name="fixprice",
-                raw_title="Набор ложек",
                 title_original="Набор ложек",
                 title_normalized="набор ложка",
                 title_original_no_stopwords="набор ложек",
@@ -343,11 +335,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 package_unit=None,
                 source_id="receiver:run-null:1",
                 sku="null-1",
-                category_raw=None,
                 category_normalized=None,
-                geo_raw=None,
                 geo_normalized=None,
-                composition_raw=None,
                 composition_normalized=None,
                 image_urls=[],
                 observed_at=observed,

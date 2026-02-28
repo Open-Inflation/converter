@@ -38,7 +38,7 @@ class RawProductRecord:
 
 @dataclass(slots=True)
 class TitleNormalizationResult:
-    raw_title: str
+    title: str
 
     name_original: str
     brand: str | None
@@ -57,7 +57,6 @@ class TitleNormalizationResult:
 class NormalizedProductRecord:
     parser_name: str
 
-    raw_title: str
     title_original: str
     title_normalized: str
     title_original_no_stopwords: str
@@ -74,13 +73,10 @@ class NormalizedProductRecord:
     sku: str | None = None
     canonical_product_id: str | None = None
 
-    category_raw: str | None = None
     category_normalized: str | None = None
 
-    geo_raw: str | None = None
     geo_normalized: str | None = None
 
-    composition_raw: str | None = None
     composition_normalized: str | None = None
 
     image_urls: list[str] = field(default_factory=list)
@@ -88,7 +84,7 @@ class NormalizedProductRecord:
     image_fingerprints: list[str] = field(default_factory=list)
 
     observed_at: datetime = field(default_factory=utcnow)
-    raw_payload: dict[str, Any] = field(default_factory=dict)
+    source_payload: dict[str, Any] = field(default_factory=dict)
 
     def identity_candidates(self) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
