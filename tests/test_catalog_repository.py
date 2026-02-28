@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from converter.adapters.catalog import _flatten_payload_nodes
 from converter import CatalogSQLiteRepository, build_default_pipeline
 from converter.core.models import NormalizedProductRecord, RawProductRecord
 from converter.core.ports import StorageRepository
@@ -26,7 +26,49 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         tmp.close()
         return Path(tmp.name)
 
-    def test_schema_does_not_include_legacy_title_columns(self) -> None:
+    @staticmethod
+    def _payload_nodes(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        id_column: str,
+        row_id: int,
+    ) -> list[tuple[str, str, str | None]]:
+        rows = conn.execute(
+            f"""
+            SELECT path, node_type, value_text
+            FROM {table}
+            WHERE {id_column} = ?
+            ORDER BY path ASC
+            """,
+            (row_id,),
+        ).fetchall()
+        return [
+            (str(row["path"]), str(row["node_type"]), row["value_text"])
+            for row in rows
+        ]
+
+    @staticmethod
+    def _asset_values(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        id_column: str,
+        row_id: int,
+        kind: str,
+    ) -> list[str]:
+        rows = conn.execute(
+            f"""
+            SELECT value
+            FROM {table}
+            WHERE {id_column} = ? AND asset_kind = ?
+            ORDER BY sort_order ASC
+            """,
+            (row_id, kind),
+        ).fetchall()
+        return [str(row["value"]) for row in rows]
+
+    def test_schema_excludes_removed_columns(self) -> None:
         db_path = self._make_db()
         try:
             CatalogSQLiteRepository(db_path)
@@ -45,16 +87,33 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
                 self.assertIn("price", product_columns)
-                self.assertIn("source_payload_json", product_columns)
                 self.assertNotIn("title_normalized", product_columns)
                 self.assertNotIn("title_original_no_stopwords", product_columns)
+                self.assertNotIn("source_payload_json", product_columns)
+                self.assertNotIn("image_urls_json", product_columns)
+                self.assertNotIn("duplicate_image_urls_json", product_columns)
+                self.assertNotIn("image_fingerprints_json", product_columns)
 
                 self.assertIn("title_original", snapshot_columns)
                 self.assertIn("title_normalized_no_stopwords", snapshot_columns)
                 self.assertIn("price", snapshot_columns)
-                self.assertIn("source_payload_json", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
                 self.assertNotIn("title_original_no_stopwords", snapshot_columns)
+                self.assertNotIn("source_payload_json", snapshot_columns)
+                self.assertNotIn("image_urls_json", snapshot_columns)
+                self.assertNotIn("duplicate_image_urls_json", snapshot_columns)
+                self.assertNotIn("image_fingerprints_json", snapshot_columns)
+
+                tables = {
+                    str(row["name"])
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                self.assertIn("catalog_product_assets", tables)
+                self.assertIn("catalog_snapshot_assets", tables)
+                self.assertIn("catalog_product_payload_nodes", tables)
+                self.assertIn("catalog_snapshot_payload_nodes", tables)
             finally:
                 conn.close()
         finally:
@@ -105,7 +164,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 product = conn.execute(
                     """
-                    SELECT price, discount_price, loyal_price, price_unit, description, source_payload_json
+                    SELECT id, price, discount_price, loyal_price, price_unit, description
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -118,16 +177,27 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(product["loyal_price"]), 129.9, places=3)
                 self.assertEqual(product["price_unit"], "RUB")
                 self.assertEqual(product["description"], "Тестовое описание")
-                product_payload = (
-                    json.loads(product["source_payload_json"])
-                    if isinstance(product["source_payload_json"], str)
-                    else product["source_payload_json"]
+                product_nodes = self._payload_nodes(
+                    conn,
+                    table="catalog_product_payload_nodes",
+                    id_column="product_id",
+                    row_id=int(product["id"]),
                 )
-                self.assertEqual(product_payload, payload)
+                self.assertEqual(sorted(product_nodes), sorted(_flatten_payload_nodes(payload)))
+                self.assertEqual(
+                    self._asset_values(
+                        conn,
+                        table="catalog_product_assets",
+                        id_column="product_id",
+                        row_id=int(product["id"]),
+                        kind="image_url",
+                    ),
+                    [],
+                )
 
                 snapshot = conn.execute(
                     """
-                    SELECT price, discount_price, loyal_price, price_unit, description, source_payload_json
+                    SELECT id, price, discount_price, loyal_price, price_unit, description
                     FROM catalog_product_snapshots
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -140,12 +210,13 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
                 self.assertEqual(snapshot["price_unit"], "RUB")
                 self.assertEqual(snapshot["description"], "Тестовое описание")
-                snapshot_payload = (
-                    json.loads(snapshot["source_payload_json"])
-                    if isinstance(snapshot["source_payload_json"], str)
-                    else snapshot["source_payload_json"]
+                snapshot_nodes = self._payload_nodes(
+                    conn,
+                    table="catalog_snapshot_payload_nodes",
+                    id_column="snapshot_id",
+                    row_id=int(snapshot["id"]),
                 )
-                self.assertEqual(snapshot_payload, payload)
+                self.assertEqual(sorted(snapshot_nodes), sorted(_flatten_payload_nodes(payload)))
             finally:
                 conn.close()
         finally:
@@ -186,7 +257,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 product = conn.execute(
                     """
-                    SELECT source_payload_json
+                    SELECT id
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -194,13 +265,16 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(product)
                 assert product is not None
-                stored_payload = (
-                    json.loads(product["source_payload_json"])
-                    if isinstance(product["source_payload_json"], str)
-                    else product["source_payload_json"]
+                nodes = self._payload_nodes(
+                    conn,
+                    table="catalog_product_payload_nodes",
+                    id_column="product_id",
+                    row_id=int(product["id"]),
                 )
                 self.assertEqual(
-                    stored_payload["receiver_artifact"]["ingested_at"],
+                    dict((path, value_text) for path, _, value_text in nodes).get(
+                        "$/receiver_artifact/ingested_at"
+                    ),
                     "2026-02-28T12:30:00+00:00",
                 )
             finally:
@@ -532,18 +606,28 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 row = conn.execute(
                     """
-                    SELECT brand, primary_category_id, settlement_id, composition_normalized, image_urls_json
+                    SELECT id, brand, primary_category_id, settlement_id, composition_normalized
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
                     ("fixprice", "receiver:run-null:1"),
                 ).fetchone()
                 self.assertIsNotNone(row)
+                assert row is not None
                 self.assertEqual(row["brand"], "O'Kitchen")
                 self.assertIsNotNone(row["primary_category_id"])
                 self.assertIsNotNone(row["settlement_id"])
                 self.assertEqual(row["composition_normalized"], "сталь")
-                self.assertEqual(json.loads(row["image_urls_json"]), ["https://cdn.example/spoons.jpg"])
+                self.assertEqual(
+                    self._asset_values(
+                        conn,
+                        table="catalog_product_assets",
+                        id_column="product_id",
+                        row_id=int(row["id"]),
+                        kind="image_url",
+                    ),
+                    ["https://cdn.example/spoons.jpg"],
+                )
             finally:
                 conn.close()
         finally:

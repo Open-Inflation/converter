@@ -52,6 +52,8 @@ converter/
 - `catalog_categories` - справочник категорий (uid/title/depth/parent).
 - `catalog_product_category_links` - связи snapshot -> category.
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
+- `catalog_product_assets` / `catalog_snapshot_assets` - массивные поля товара (image urls, duplicates, fingerprints) в нормализованном виде.
+- `catalog_product_payload_nodes` / `catalog_snapshot_payload_nodes` - полный payload источника как дерево узлов (без JSON-колонок).
 
 Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
@@ -60,7 +62,7 @@ converter/
 Converter сохраняет расширенный product-контракт без потерь: в snapshots/current projection
 пишутся цены (`price/discount_price/loyal_price/price_unit`), product-флаги и producer/rating,
 а полный источник из receiver (product/artifact/admin/categories/images/meta/wholesale/category-links)
-доступен в `source_payload_json`.
+сохраняется в реляционных таблицах `catalog_*_payload_nodes` (без JSON-колонок).
 
 Политика обновления:
 
@@ -107,7 +109,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 - `converter.adapters.ReceiverSQLiteRepository`
 - поддерживает только актуальную схему `receiver` (`run_artifacts.parser_name` обязателен).
-- если колонка отсутствует, адаптер выбрасывает ошибку и требует применить ручные миграции `receiver` от `2026-02-26`.
+- если обязательной колонки нет, адаптер падает с ошибкой несовместимой схемы.
 
 Есть sink под SQLite-базу `catalog`:
 

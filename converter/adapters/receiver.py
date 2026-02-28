@@ -706,7 +706,7 @@ class ReceiverRepository:
         if "parser_name" not in columns:
             raise RuntimeError(
                 "Unsupported receiver schema: run_artifacts.parser_name is missing. "
-                "Apply receiver manual migrations from 2026-02-26."
+                "Use the current receiver schema."
             )
         required_artifact = {
             "retail_type",

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,14 +8,15 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     DateTime,
     Float,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
+    delete,
     inspect,
     select,
 )
@@ -58,6 +58,48 @@ def _is_missing(value: object) -> bool:
     if isinstance(value, str) and not value.strip():
         return True
     return False
+
+
+def _pointer_escape(token: str) -> str:
+    return token.replace("~", "~0").replace("/", "~1")
+
+
+def _payload_node(path: str, node_type: str, value_text: str | None) -> tuple[str, str, str | None]:
+    return path, node_type, value_text
+
+
+def _flatten_payload_nodes(value: object) -> list[tuple[str, str, str | None]]:
+    out: list[tuple[str, str, str | None]] = []
+
+    def walk(path: str, current: object) -> None:
+        if isinstance(current, dict):
+            out.append(_payload_node(path, "object", None))
+            for key, item in current.items():
+                child = f"{path}/{_pointer_escape(str(key))}"
+                walk(child, item)
+            return
+        if isinstance(current, list):
+            out.append(_payload_node(path, "array", str(len(current))))
+            for idx, item in enumerate(current):
+                child = f"{path}/{idx}"
+                walk(child, item)
+            return
+        if current is None:
+            out.append(_payload_node(path, "null", None))
+            return
+        if isinstance(current, bool):
+            out.append(_payload_node(path, "bool", "1" if current else "0"))
+            return
+        if isinstance(current, int) and not isinstance(current, bool):
+            out.append(_payload_node(path, "int", str(current)))
+            return
+        if isinstance(current, float):
+            out.append(_payload_node(path, "float", repr(current)))
+            return
+        out.append(_payload_node(path, "str", str(current)))
+
+    walk("$", value)
+    return out
 
 
 class _CatalogBase(DeclarativeBase):
@@ -108,11 +150,6 @@ class _CatalogProduct(_CatalogBase):
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
-
-    image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    duplicate_image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    source_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
@@ -168,11 +205,6 @@ class _CatalogProductSnapshot(_CatalogBase):
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-
-    image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    duplicate_image_urls_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    image_fingerprints_json: Mapped[Any] = mapped_column(JSON, nullable=False)
-    source_payload_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
@@ -290,11 +322,91 @@ class _CatalogImageFingerprint(_CatalogBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class _CatalogProductAsset(_CatalogBase):
+    __tablename__ = "catalog_product_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "asset_kind",
+            "sort_order",
+            name="uq_catalog_product_assets_slot",
+        ),
+    )
+
+
+class _CatalogSnapshotAsset(_CatalogBase):
+    __tablename__ = "catalog_snapshot_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "asset_kind",
+            "sort_order",
+            name="uq_catalog_snapshot_assets_slot",
+        ),
+    )
+
+
+class _CatalogProductPayloadNode(_CatalogBase):
+    __tablename__ = "catalog_product_payload_nodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "path",
+            name="uq_catalog_product_payload_nodes_path",
+        ),
+    )
+
+
+class _CatalogSnapshotPayloadNode(_CatalogBase):
+    __tablename__ = "catalog_snapshot_payload_nodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_id",
+            "path",
+            name="uq_catalog_snapshot_payload_nodes_path",
+        ),
+    )
+
+
 class _ConverterSyncState(_CatalogBase):
     __tablename__ = "converter_sync_state"
 
     state_key: Mapped[str] = mapped_column("key", String(191), primary_key=True)
-    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -375,21 +487,14 @@ class CatalogRepository:
             if row is None:
                 return None, None
 
-            raw_value = row.value
-            if isinstance(raw_value, str):
-                try:
-                    parsed = json.loads(raw_value)
-                except json.JSONDecodeError:
-                    return None, None
-            elif isinstance(raw_value, dict):
-                parsed = raw_value
-            else:
+            token = _safe_str(row.value)
+            if token is None:
                 return None, None
 
-            ingested_at = _safe_str(parsed.get("ingested_at"))
-            product_id_raw = parsed.get("product_id")
-            product_id = int(product_id_raw) if isinstance(product_id_raw, int) or str(product_id_raw).isdigit() else None
-            return ingested_at, product_id
+            if "\t" not in token:
+                return None, None
+            ingested_at_raw, product_id_raw = token.rsplit("\t", 1)
+            return _safe_str(ingested_at_raw), self._to_int(product_id_raw)
 
     def set_receiver_cursor(
         self,
@@ -398,10 +503,7 @@ class CatalogRepository:
         ingested_at: str,
         product_id: int,
     ) -> None:
-        payload = {
-            "ingested_at": ingested_at,
-            "product_id": int(product_id),
-        }
+        encoded = f"{ingested_at}\t{int(product_id)}"
         now = _utc_now()
 
         with self._session_factory() as session:
@@ -410,12 +512,12 @@ class CatalogRepository:
             if row is None:
                 row = _ConverterSyncState(
                     state_key=key,
-                    value=payload,
+                    value=encoded,
                     updated_at=now,
                 )
                 session.add(row)
             else:
-                row.value = payload
+                row.value = encoded
                 row.updated_at = now
             session.commit()
 
@@ -675,15 +777,14 @@ class CatalogRepository:
             geo_normalized=record.geo_normalized,
             composition_normalized=record.composition_normalized,
             settlement_id=settlement.id if settlement is not None else None,
-            image_urls_json=list(record.image_urls),
-            duplicate_image_urls_json=list(record.duplicate_image_urls),
-            image_fingerprints_json=list(record.image_fingerprints),
-            source_payload_json=payload,
             observed_at=self._to_utc(record.observed_at),
             created_at=now,
         )
         session.add(snapshot)
         session.flush([snapshot])
+        if snapshot.id is not None:
+            self._insert_snapshot_assets(session, int(snapshot.id), record, now=now)
+            self._insert_snapshot_payload_nodes(session, int(snapshot.id), payload, now=now)
         return snapshot
 
     def _upsert_product_source(
@@ -1078,13 +1179,13 @@ class CatalogRepository:
                 primary_category_id=primary_category_id,
                 settlement_id=settlement_id,
                 composition_normalized=record.composition_normalized,
-                image_urls_json=list(record.image_urls),
-                duplicate_image_urls_json=list(record.duplicate_image_urls),
-                image_fingerprints_json=list(record.image_fingerprints),
-                source_payload_json=payload,
                 observed_at=self._to_utc(record.observed_at),
             )
             session.add(existing)
+            session.flush([existing])
+            if existing.id is not None:
+                self._replace_product_assets(session, int(existing.id), record, now=now)
+                self._replace_product_payload_nodes(session, int(existing.id), payload, now=now)
             return
 
         existing.updated_at = now
@@ -1153,13 +1254,106 @@ class CatalogRepository:
         if not _is_missing(record.composition_normalized):
             existing.composition_normalized = record.composition_normalized
 
-        if record.image_urls:
-            existing.image_urls_json = list(record.image_urls)
-            existing.duplicate_image_urls_json = list(record.duplicate_image_urls)
-            existing.image_fingerprints_json = list(record.image_fingerprints)
-        existing.source_payload_json = payload
+        if existing.id is not None and record.image_urls:
+            self._replace_product_assets(session, int(existing.id), record, now=now)
+        if existing.id is not None:
+            self._replace_product_payload_nodes(session, int(existing.id), payload, now=now)
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
+
+    @staticmethod
+    def _iter_asset_values(record: NormalizedProductRecord) -> list[tuple[str, list[str]]]:
+        return [
+            ("image_url", list(record.image_urls)),
+            ("duplicate_image_url", list(record.duplicate_image_urls)),
+            ("image_fingerprint", list(record.image_fingerprints)),
+        ]
+
+    def _replace_product_assets(
+        self,
+        session: Session,
+        product_id: int,
+        record: NormalizedProductRecord,
+        *,
+        now: datetime,
+    ) -> None:
+        session.execute(
+            delete(_CatalogProductAsset).where(_CatalogProductAsset.product_id == int(product_id))
+        )
+        for asset_kind, values in self._iter_asset_values(record):
+            for idx, value in enumerate(values):
+                session.add(
+                    _CatalogProductAsset(
+                        product_id=int(product_id),
+                        asset_kind=asset_kind,
+                        sort_order=idx,
+                        value=str(value),
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+
+    def _insert_snapshot_assets(
+        self,
+        session: Session,
+        snapshot_id: int,
+        record: NormalizedProductRecord,
+        *,
+        now: datetime,
+    ) -> None:
+        for asset_kind, values in self._iter_asset_values(record):
+            for idx, value in enumerate(values):
+                session.add(
+                    _CatalogSnapshotAsset(
+                        snapshot_id=int(snapshot_id),
+                        asset_kind=asset_kind,
+                        sort_order=idx,
+                        value=str(value),
+                        created_at=now,
+                    )
+                )
+
+    def _replace_product_payload_nodes(
+        self,
+        session: Session,
+        product_id: int,
+        payload: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> None:
+        session.execute(
+            delete(_CatalogProductPayloadNode).where(_CatalogProductPayloadNode.product_id == int(product_id))
+        )
+        for path, node_type, value_text in _flatten_payload_nodes(payload):
+            session.add(
+                _CatalogProductPayloadNode(
+                    product_id=int(product_id),
+                    path=path,
+                    node_type=node_type,
+                    value_text=value_text,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+    def _insert_snapshot_payload_nodes(
+        self,
+        session: Session,
+        snapshot_id: int,
+        payload: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> None:
+        for path, node_type, value_text in _flatten_payload_nodes(payload):
+            session.add(
+                _CatalogSnapshotPayloadNode(
+                    snapshot_id=int(snapshot_id),
+                    path=path,
+                    node_type=node_type,
+                    value_text=value_text,
+                    created_at=now,
+                )
+            )
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
@@ -1265,13 +1459,27 @@ class CatalogRepository:
             "discount_price",
             "loyal_price",
             "price_unit",
-            "source_payload_json",
         )
         missing = [name for name in required if name not in columns]
         if missing:
             raise RuntimeError(
                 "Schema mismatch in `catalog_products`: missing columns "
-                f"{', '.join(missing)}. Apply DB migrations before starting converter."
+                f"{', '.join(missing)}. Use the current converter schema."
+            )
+        forbidden_product_json_columns = [
+            name
+            for name in (
+                "image_urls_json",
+                "duplicate_image_urls_json",
+                "image_fingerprints_json",
+                "source_payload_json",
+            )
+            if name in columns
+        ]
+        if forbidden_product_json_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_products`: JSON columns are not allowed "
+                f"({', '.join(forbidden_product_json_columns)}). Use normalized tables."
             )
 
         if not inspector.has_table("catalog_product_snapshots"):
@@ -1282,14 +1490,40 @@ class CatalogRepository:
             "discount_price",
             "loyal_price",
             "price_unit",
-            "source_payload_json",
         )
         snapshot_missing = [name for name in snapshot_required if name not in snapshot_columns]
         if snapshot_missing:
             raise RuntimeError(
                 "Schema mismatch in `catalog_product_snapshots`: missing columns "
-                f"{', '.join(snapshot_missing)}. Apply DB migrations before starting converter."
+                f"{', '.join(snapshot_missing)}. Use the current converter schema."
             )
+        forbidden_snapshot_json_columns = [
+            name
+            for name in (
+                "image_urls_json",
+                "duplicate_image_urls_json",
+                "image_fingerprints_json",
+                "source_payload_json",
+            )
+            if name in snapshot_columns
+        ]
+        if forbidden_snapshot_json_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_snapshots`: JSON columns are not allowed "
+                f"({', '.join(forbidden_snapshot_json_columns)}). Use normalized tables."
+            )
+
+        expected_tables = (
+            "catalog_product_assets",
+            "catalog_snapshot_assets",
+            "catalog_product_payload_nodes",
+            "catalog_snapshot_payload_nodes",
+        )
+        for table_name in expected_tables:
+            if not inspector.has_table(table_name):
+                raise RuntimeError(
+                    f"Schema mismatch: missing table `{table_name}`. Use the current converter schema."
+                )
 
     @staticmethod
     def _build_storage_repository_from_env() -> StorageRepository | None:

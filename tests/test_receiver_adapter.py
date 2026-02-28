@@ -176,7 +176,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
             conn.close()
         return db_path
 
-    def test_legacy_schema_is_rejected(self) -> None:
+    def test_schema_without_parser_name_is_rejected(self) -> None:
         db_path = self._make_db(include_artifact_parser_name=False)
         try:
             conn = sqlite3.connect(db_path)
