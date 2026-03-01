@@ -371,6 +371,7 @@ class _CatalogProductPayloadNode(_CatalogBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     product_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    path_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     node_type: Mapped[str] = mapped_column(String(16), nullable=False)
     value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -379,8 +380,8 @@ class _CatalogProductPayloadNode(_CatalogBase):
     __table_args__ = (
         UniqueConstraint(
             "product_id",
-            "path",
-            name="uq_catalog_product_payload_nodes_path",
+            "path_hash",
+            name="uq_catalog_product_payload_nodes_path_hash",
         ),
     )
 
@@ -391,6 +392,7 @@ class _CatalogSnapshotPayloadNode(_CatalogBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    path_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     node_type: Mapped[str] = mapped_column(String(16), nullable=False)
     value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -398,8 +400,8 @@ class _CatalogSnapshotPayloadNode(_CatalogBase):
     __table_args__ = (
         UniqueConstraint(
             "snapshot_id",
-            "path",
-            name="uq_catalog_snapshot_payload_nodes_path",
+            "path_hash",
+            name="uq_catalog_snapshot_payload_nodes_path_hash",
         ),
     )
 
@@ -1332,10 +1334,12 @@ class CatalogRepository:
             delete(_CatalogProductPayloadNode).where(_CatalogProductPayloadNode.product_id == int(product_id))
         )
         for path, node_type, value_text in _flatten_payload_nodes(payload):
+            path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
             session.add(
                 _CatalogProductPayloadNode(
                     product_id=int(product_id),
                     path=path,
+                    path_hash=path_hash,
                     node_type=node_type,
                     value_text=value_text,
                     created_at=now,
@@ -1352,10 +1356,12 @@ class CatalogRepository:
         now: datetime,
     ) -> None:
         for path, node_type, value_text in _flatten_payload_nodes(payload):
+            path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
             session.add(
                 _CatalogSnapshotPayloadNode(
                     snapshot_id=int(snapshot_id),
                     path=path,
+                    path_hash=path_hash,
                     node_type=node_type,
                     value_text=value_text,
                     created_at=now,
@@ -1532,6 +1538,18 @@ class CatalogRepository:
             if not inspector.has_table(table_name):
                 raise RuntimeError(
                     f"Schema mismatch: missing table `{table_name}`. Use the current converter schema."
+                )
+        payload_required_columns = {
+            "catalog_product_payload_nodes": ("product_id", "path", "path_hash", "node_type"),
+            "catalog_snapshot_payload_nodes": ("snapshot_id", "path", "path_hash", "node_type"),
+        }
+        for table_name, required_columns in payload_required_columns.items():
+            table_columns = {item["name"] for item in inspector.get_columns(table_name)}
+            missing_columns = [name for name in required_columns if name not in table_columns]
+            if missing_columns:
+                raise RuntimeError(
+                    f"Schema mismatch in `{table_name}`: missing columns "
+                    f"{', '.join(missing_columns)}. Use the current converter schema."
                 )
 
     @staticmethod
