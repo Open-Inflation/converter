@@ -16,6 +16,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parser-name", default="fixprice", help="Default parser_name")
 
     parser.add_argument("--batch-size", type=int, default=250, help="Default batch size per queue job")
+    parser.add_argument(
+        "--txn-chunk-size",
+        type=int,
+        default=25,
+        help="Default transactional subchunk size inside each fetched batch",
+    )
     parser.add_argument("--max-batches", type=int, default=0, help="Default max batches per queue job")
     parser.add_argument("--max-queue-size", type=int, default=100, help="Max queued jobs")
 
@@ -42,6 +48,7 @@ def main() -> None:
         default_catalog_db=(args.catalog_db or "").strip() or None,
         default_parser_name=args.parser_name,
         default_batch_size=args.batch_size,
+        default_txn_chunk_size=args.txn_chunk_size,
         default_max_batches=args.max_batches,
         auth_token=(args.auth_token or "").strip() or None,
     )
@@ -52,6 +59,7 @@ def main() -> None:
         f"default_receiver_db={bool((args.receiver_db or '').strip())}",
         f"default_catalog_db={bool((args.catalog_db or '').strip())}",
         f"default_parser={args.parser_name}",
+        f"default_txn_chunk_size={int(args.txn_chunk_size)}",
     )
 
     try:

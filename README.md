@@ -125,7 +125,8 @@ python3 sync_receiver_to_catalog.py \
   --receiver-db ../receiver/data/receiver.db \
   --catalog-db ./data/catalog.db \
   --parser-name fixprice \
-  --batch-size 250
+  --batch-size 250 \
+  --txn-chunk-size 25
 ```
 
 Полный sync `receiver -> catalog` (MySQL):
@@ -136,7 +137,8 @@ python3 sync_receiver_to_catalog.py \
   --receiver-db 'mysql+pymysql://user:pass@127.0.0.1:3306/receiver' \
   --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog' \
   --parser-name fixprice \
-  --batch-size 250
+  --batch-size 250 \
+  --txn-chunk-size 25
 ```
 
 ### Очистка дублей изображений в storage
@@ -162,6 +164,7 @@ python3 converter_daemon.py \
   --catalog-db ./data/catalog.db \
   --parser-name fixprice \
   --batch-size 250 \
+  --txn-chunk-size 25 \
   --max-queue-size 100
 ```
 
@@ -175,8 +178,11 @@ HTTP точки:
 ```bash
 curl -X POST http://127.0.0.1:8090/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver"}'
+  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver","txn_chunk_size":25}'
 ```
+
+`txn_chunk_size` задаёт размер микротранзакции внутри одного fetch-batch:
+`upsert + cursor` коммитятся вместе на каждый subchunk.
 
 Дедупликация очереди выполняется по ключу `(receiver_db, catalog_db, parser_name)`:
 пока задача с тем же ключом в pending/active, повторный trigger не создаст дубль.

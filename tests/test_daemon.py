@@ -51,6 +51,7 @@ class ConverterDaemonTests(unittest.TestCase):
                     receiver_db="/tmp/receiver.db",
                     catalog_db="/tmp/catalog.db",
                     parser_name="fixprice",
+                    txn_chunk_size=31,
                 )
             )
             second = daemon.enqueue(
@@ -58,6 +59,7 @@ class ConverterDaemonTests(unittest.TestCase):
                     receiver_db="/tmp/receiver.db",
                     catalog_db="/tmp/catalog.db",
                     parser_name="fixprice",
+                    txn_chunk_size=7,
                 )
             )
 
@@ -71,6 +73,7 @@ class ConverterDaemonTests(unittest.TestCase):
             self.assertTrue(_wait_until(lambda: fake.size() == 1))
             snapshot = daemon.snapshot()
             self.assertEqual(snapshot["total_processed"], 1)
+            self.assertEqual(fake.jobs[0].txn_chunk_size, 31)
         finally:
             daemon.stop()
 
@@ -103,7 +106,7 @@ class ConverterDaemonTests(unittest.TestCase):
 
             status, body = _post_json(
                 f"{base_url}/trigger",
-                payload={"parser_name": "fixprice", "run_id": "run-1"},
+                payload={"parser_name": "fixprice", "run_id": "run-1", "txn_chunk_size": 17},
                 headers={"Authorization": "Bearer test-token"},
             )
             self.assertEqual(status, 202)
@@ -114,6 +117,42 @@ class ConverterDaemonTests(unittest.TestCase):
             self.assertEqual(fake.jobs[0].parser_name, "fixprice")
             self.assertEqual(fake.jobs[0].receiver_db, "/tmp/receiver.db")
             self.assertEqual(fake.jobs[0].catalog_db, "/tmp/catalog.db")
+            self.assertEqual(fake.jobs[0].txn_chunk_size, 17)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+            daemon.stop()
+
+    def test_http_trigger_uses_default_txn_chunk_size(self) -> None:
+        fake = _FakeSyncService()
+        daemon = ConverterDaemon(sync_service=fake, max_queue_size=10)
+        daemon.start()
+        server = ConverterDaemonHTTPServer(
+            ("127.0.0.1", 0),
+            ConverterDaemonRequestHandler,
+            daemon=daemon,
+            default_receiver_db="/tmp/receiver.db",
+            default_catalog_db="/tmp/catalog.db",
+            default_txn_chunk_size=29,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        try:
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+
+            status, body = _post_json(
+                f"{base_url}/trigger",
+                payload={"parser_name": "fixprice", "run_id": "run-2"},
+                headers={},
+            )
+            self.assertEqual(status, 202)
+            self.assertTrue(body.get("accepted"))
+
+            self.assertTrue(_wait_until(lambda: fake.size() == 1))
+            self.assertEqual(fake.jobs[0].txn_chunk_size, 29)
         finally:
             server.shutdown()
             thread.join(timeout=2.0)

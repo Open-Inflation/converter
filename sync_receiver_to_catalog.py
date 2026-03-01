@@ -36,6 +36,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Stop after N batches (0 means no limit)",
     )
+    parser.add_argument(
+        "--txn-chunk-size",
+        type=int,
+        default=25,
+        help="Transactional subchunk size inside one fetched batch",
+    )
     return parser
 
 
@@ -48,6 +54,7 @@ def main() -> None:
         f"catalog={args.catalog_db}",
         f"parser={args.parser_name}",
         f"batch_size={args.batch_size}",
+        f"txn_chunk_size={args.txn_chunk_size}",
     )
 
     service = ConverterSyncService()
@@ -65,6 +72,7 @@ def main() -> None:
             parser_name=args.parser_name,
             batch_size=args.batch_size,
             max_batches=args.max_batches,
+            txn_chunk_size=args.txn_chunk_size,
         ),
         on_batch=_on_batch,
     )

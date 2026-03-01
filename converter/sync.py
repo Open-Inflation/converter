@@ -24,6 +24,7 @@ class SyncJob:
     parser_name: str = "fixprice"
     batch_size: int = 250
     max_batches: int = 0
+    txn_chunk_size: int = 25
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,7 @@ class ConverterSyncService:
         parser_name = job.parser_name.strip() or "fixprice"
         batch_size = max(1, int(job.batch_size))
         max_batches = max(0, int(job.max_batches))
+        txn_chunk_size = max(1, int(job.txn_chunk_size))
 
         watermark_ingested_at, watermark_product_id = catalog_repo.get_receiver_cursor(parser_name)
         total_processed = 0
@@ -134,15 +136,27 @@ class ConverterSyncService:
             if not raw_records:
                 break
 
-            normalized = [self._registry.get(item.parser_name).handle(item) for item in raw_records]
-            catalog_repo.upsert_many(normalized)
+            upsert_with_cursor = getattr(catalog_repo, "upsert_many_with_cursor", None)
+            for chunk_start in range(0, len(raw_records), txn_chunk_size):
+                raw_chunk = raw_records[chunk_start : chunk_start + txn_chunk_size]
+                normalized = [self._registry.get(item.parser_name).handle(item) for item in raw_chunk]
+                chunk_ingested_at, chunk_product_id = _cursor_from_records(raw_chunk)
 
-            watermark_ingested_at, watermark_product_id = _cursor_from_records(raw_records)
-            catalog_repo.set_receiver_cursor(
-                parser_name,
-                ingested_at=watermark_ingested_at,
-                product_id=watermark_product_id,
-            )
+                if callable(upsert_with_cursor):
+                    upsert_with_cursor(
+                        normalized,
+                        parser_name=parser_name,
+                        cursor_ingested_at=chunk_ingested_at,
+                        cursor_product_id=chunk_product_id,
+                    )
+                else:
+                    catalog_repo.upsert_many(normalized)
+                    catalog_repo.set_receiver_cursor(
+                        parser_name,
+                        ingested_at=chunk_ingested_at,
+                        product_id=chunk_product_id,
+                    )
+                watermark_ingested_at, watermark_product_id = chunk_ingested_at, chunk_product_id
 
             batches += 1
             total_processed += len(raw_records)

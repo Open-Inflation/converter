@@ -18,6 +18,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     inspect,
+    insert,
     select,
 )
 from sqlalchemy.engine import Engine
@@ -461,28 +462,26 @@ class CatalogRepository:
             return
 
         with self._session_factory() as session:
-            for record in records:
-                canonical_product_id = self._resolve_canonical_product_id(session, record)
-                record.canonical_product_id = canonical_product_id
+            self._upsert_many_in_session(session, records)
+            session.commit()
 
-                self._apply_persistent_image_dedup(session, record)
-                self._apply_backfill(session, record)
-
-                settlement = self._upsert_settlement(session, record)
-                snapshot = self._insert_product_snapshot(session, record, settlement=settlement)
-                self._append_settlement_geodata(session, settlement=settlement, record=record)
-
-                categories = self._upsert_categories(session, record)
-                self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
-
-                self._upsert_product_source(session, record, snapshot=snapshot)
-                self._upsert_product_row(
-                    session,
-                    record,
-                    settlement=settlement,
-                    categories=categories,
-                )
-
+    def upsert_many_with_cursor(
+        self,
+        records: list[NormalizedProductRecord],
+        *,
+        parser_name: str,
+        cursor_ingested_at: str,
+        cursor_product_id: int,
+    ) -> None:
+        with self._session_factory() as session:
+            if records:
+                self._upsert_many_in_session(session, records)
+            self._set_receiver_cursor_in_session(
+                session,
+                parser_name,
+                ingested_at=cursor_ingested_at,
+                product_id=cursor_product_id,
+            )
             session.commit()
 
     def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
@@ -508,23 +507,65 @@ class CatalogRepository:
         ingested_at: str,
         product_id: int,
     ) -> None:
+        with self._session_factory() as session:
+            self._set_receiver_cursor_in_session(
+                session,
+                parser_name,
+                ingested_at=ingested_at,
+                product_id=product_id,
+            )
+            session.commit()
+
+    def _set_receiver_cursor_in_session(
+        self,
+        session: Session,
+        parser_name: str,
+        *,
+        ingested_at: str,
+        product_id: int,
+    ) -> None:
         encoded = f"{ingested_at}\t{int(product_id)}"
         now = _utc_now()
+        key = self._cursor_key(parser_name)
+        row = session.get(_ConverterSyncState, key)
+        if row is None:
+            row = _ConverterSyncState(
+                state_key=key,
+                value=encoded,
+                updated_at=now,
+            )
+            session.add(row)
+            return
 
-        with self._session_factory() as session:
-            key = self._cursor_key(parser_name)
-            row = session.get(_ConverterSyncState, key)
-            if row is None:
-                row = _ConverterSyncState(
-                    state_key=key,
-                    value=encoded,
-                    updated_at=now,
-                )
-                session.add(row)
-            else:
-                row.value = encoded
-                row.updated_at = now
-            session.commit()
+        row.value = encoded
+        row.updated_at = now
+
+    def _upsert_many_in_session(
+        self,
+        session: Session,
+        records: list[NormalizedProductRecord],
+    ) -> None:
+        for record in records:
+            canonical_product_id = self._resolve_canonical_product_id(session, record)
+            record.canonical_product_id = canonical_product_id
+
+            self._apply_persistent_image_dedup(session, record)
+            self._apply_backfill(session, record)
+
+            settlement = self._upsert_settlement(session, record)
+            snapshot = self._insert_product_snapshot(session, record, settlement=settlement)
+            self._append_settlement_geodata(session, settlement=settlement, record=record)
+
+            categories = self._upsert_categories(session, record)
+            self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
+
+            self._upsert_product_source(session, record, snapshot=snapshot)
+            self._upsert_product_row(
+                session,
+                record,
+                settlement=settlement,
+                categories=categories,
+            )
 
     @staticmethod
     def _create_engine(database_url: str) -> Engine:
@@ -1317,18 +1358,21 @@ class CatalogRepository:
         session.execute(
             delete(_CatalogProductAsset).where(_CatalogProductAsset.product_id == int(product_id))
         )
+        rows: list[dict[str, Any]] = []
         for asset_kind, values in self._iter_asset_values(record):
             for idx, value in enumerate(values):
-                session.add(
-                    _CatalogProductAsset(
-                        product_id=int(product_id),
-                        asset_kind=asset_kind,
-                        sort_order=idx,
-                        value=str(value),
-                        created_at=now,
-                        updated_at=now,
-                    )
+                rows.append(
+                    {
+                        "product_id": int(product_id),
+                        "asset_kind": asset_kind,
+                        "sort_order": idx,
+                        "value": str(value),
+                        "created_at": now,
+                        "updated_at": now,
+                    }
                 )
+        if rows:
+            session.execute(insert(_CatalogProductAsset), rows)
 
     def _insert_snapshot_assets(
         self,
@@ -1338,17 +1382,20 @@ class CatalogRepository:
         *,
         now: datetime,
     ) -> None:
+        rows: list[dict[str, Any]] = []
         for asset_kind, values in self._iter_asset_values(record):
             for idx, value in enumerate(values):
-                session.add(
-                    _CatalogSnapshotAsset(
-                        snapshot_id=int(snapshot_id),
-                        asset_kind=asset_kind,
-                        sort_order=idx,
-                        value=str(value),
-                        created_at=now,
-                    )
+                rows.append(
+                    {
+                        "snapshot_id": int(snapshot_id),
+                        "asset_kind": asset_kind,
+                        "sort_order": idx,
+                        "value": str(value),
+                        "created_at": now,
+                    }
                 )
+        if rows:
+            session.execute(insert(_CatalogSnapshotAsset), rows)
 
     def _replace_product_payload_nodes(
         self,
@@ -1361,19 +1408,22 @@ class CatalogRepository:
         session.execute(
             delete(_CatalogProductPayloadNode).where(_CatalogProductPayloadNode.product_id == int(product_id))
         )
+        rows: list[dict[str, Any]] = []
         for path, node_type, value_text in _flatten_payload_nodes(payload):
             path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
-            session.add(
-                _CatalogProductPayloadNode(
-                    product_id=int(product_id),
-                    path=path,
-                    path_hash=path_hash,
-                    node_type=node_type,
-                    value_text=value_text,
-                    created_at=now,
-                    updated_at=now,
-                )
+            rows.append(
+                {
+                    "product_id": int(product_id),
+                    "path": path,
+                    "path_hash": path_hash,
+                    "node_type": node_type,
+                    "value_text": value_text,
+                    "created_at": now,
+                    "updated_at": now,
+                }
             )
+        if rows:
+            session.execute(insert(_CatalogProductPayloadNode), rows)
 
     def _insert_snapshot_payload_nodes(
         self,
@@ -1383,18 +1433,21 @@ class CatalogRepository:
         *,
         now: datetime,
     ) -> None:
+        rows: list[dict[str, Any]] = []
         for path, node_type, value_text in _flatten_payload_nodes(payload):
             path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
-            session.add(
-                _CatalogSnapshotPayloadNode(
-                    snapshot_id=int(snapshot_id),
-                    path=path,
-                    path_hash=path_hash,
-                    node_type=node_type,
-                    value_text=value_text,
-                    created_at=now,
-                )
+            rows.append(
+                {
+                    "snapshot_id": int(snapshot_id),
+                    "path": path,
+                    "path_hash": path_hash,
+                    "node_type": node_type,
+                    "value_text": value_text,
+                    "created_at": now,
+                }
             )
+        if rows:
+            session.execute(insert(_CatalogSnapshotPayloadNode), rows)
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:

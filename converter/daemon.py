@@ -23,6 +23,7 @@ class QueueJob:
     parser_name: str = "fixprice"
     batch_size: int = 250
     max_batches: int = 0
+    txn_chunk_size: int = 25
     run_id: str | None = None
     source: str = "receiver"
 
@@ -40,6 +41,7 @@ class QueueJob:
             parser_name=self.parser_name,
             batch_size=self.batch_size,
             max_batches=self.max_batches,
+            txn_chunk_size=self.txn_chunk_size,
         )
 
 
@@ -223,6 +225,7 @@ class ConverterDaemonHTTPServer(ThreadingHTTPServer):
         default_parser_name: str = "fixprice",
         default_batch_size: int = 250,
         default_max_batches: int = 0,
+        default_txn_chunk_size: int = 25,
         auth_token: str | None = None,
     ) -> None:
         super().__init__(server_address, request_handler_cls)
@@ -232,6 +235,7 @@ class ConverterDaemonHTTPServer(ThreadingHTTPServer):
         self.default_parser_name = default_parser_name.strip() or "fixprice"
         self.default_batch_size = max(1, int(default_batch_size))
         self.default_max_batches = max(0, int(default_max_batches))
+        self.default_txn_chunk_size = max(1, int(default_txn_chunk_size))
         self.auth_token = (auth_token or "").strip() or None
 
 
@@ -275,6 +279,11 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
 
         batch_size = _to_int(payload.get("batch_size"), default=self.server.default_batch_size, minimum=1)
         max_batches = _to_int(payload.get("max_batches"), default=self.server.default_max_batches, minimum=0)
+        txn_chunk_size = _to_int(
+            payload.get("txn_chunk_size"),
+            default=self.server.default_txn_chunk_size,
+            minimum=1,
+        )
 
         job = QueueJob(
             receiver_db=receiver_db,
@@ -282,6 +291,7 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
             parser_name=parser_name,
             batch_size=batch_size,
             max_batches=max_batches,
+            txn_chunk_size=txn_chunk_size,
             run_id=run_id,
             source=source,
         )
