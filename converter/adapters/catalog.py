@@ -893,8 +893,7 @@ class CatalogRepository:
             return
 
         payload = self._source_payload(record)
-        latitude = _as_float(payload.get("receiver_geo_latitude"))
-        longitude = _as_float(payload.get("receiver_geo_longitude"))
+        latitude, longitude = self._extract_geo_coordinates(payload)
         if latitude is None or longitude is None:
             return
 
@@ -1028,8 +1027,7 @@ class CatalogRepository:
         name = _safe_str(payload.get("receiver_geo_name"))
         settlement_type = _safe_str(payload.get("receiver_geo_settlement_type"))
         alias = _safe_str(payload.get("receiver_geo_alias"))
-        latitude = _as_float(payload.get("receiver_geo_latitude"))
-        longitude = _as_float(payload.get("receiver_geo_longitude"))
+        latitude, longitude = self._extract_geo_coordinates(payload)
 
         if name is None and record.geo_normalized:
             parts = [segment.strip() for segment in str(record.geo_normalized).split(",") if segment.strip()]
@@ -1059,6 +1057,36 @@ class CatalogRepository:
             "latitude": latitude,
             "longitude": longitude,
         }
+
+    @staticmethod
+    def _extract_geo_coordinates(payload: dict[str, Any]) -> tuple[float | None, float | None]:
+        # Prefer admin-unit coordinates, then fallback to artifact-level coordinates.
+        latitude = _as_float(payload.get("receiver_geo_latitude"))
+        longitude = _as_float(payload.get("receiver_geo_longitude"))
+        if latitude is not None and longitude is not None:
+            return latitude, longitude
+
+        admin = payload.get("receiver_admin_unit")
+        if isinstance(admin, dict):
+            latitude = _as_float(admin.get("latitude"))
+            longitude = _as_float(admin.get("longitude"))
+            if latitude is not None and longitude is not None:
+                return latitude, longitude
+
+        artifact = payload.get("receiver_artifact")
+        if isinstance(artifact, dict):
+            latitude = _as_float(artifact.get("latitude"))
+            longitude = _as_float(artifact.get("longitude"))
+            if latitude is not None and longitude is not None:
+                return latitude, longitude
+
+        # Compatibility with flat payload variants.
+        latitude = _as_float(payload.get("artifact_latitude"))
+        longitude = _as_float(payload.get("artifact_longitude"))
+        if latitude is not None and longitude is not None:
+            return latitude, longitude
+
+        return None, None
 
     def _extract_category_candidates(self, record: NormalizedProductRecord) -> list[dict[str, object]]:
         payload = self._source_payload(record)

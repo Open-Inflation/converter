@@ -526,6 +526,53 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_upsert_persists_geodata_from_artifact_coordinates_fallback(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            raw = RawProductRecord(
+                parser_name="chizhik",
+                source_id="receiver:run-geo-artifact:1",
+                sku="geo-artifact-1",
+                title="Тарелка",
+                geo="RUS, Ленинградская область, Санкт-Петербург",
+                observed_at=datetime(2026, 2, 10, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-geo-artifact",
+                    "receiver_artifact_id": 777,
+                    "receiver_product_id": 11,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_latitude": None,
+                    "receiver_geo_longitude": None,
+                    "receiver_artifact": {
+                        "latitude": 59.93863,
+                        "longitude": 30.31413,
+                    },
+                },
+            )
+
+            normalized = pipeline.process_one(raw)
+            repo.upsert_many([normalized])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                geo = conn.execute(
+                    "SELECT latitude, longitude FROM catalog_settlement_geodata ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                self.assertIsNotNone(geo)
+                assert geo is not None
+                self.assertAlmostEqual(float(geo["latitude"]), 59.93863, places=5)
+                self.assertAlmostEqual(float(geo["longitude"]), 30.31413, places=5)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_upsert_requests_storage_delete_for_duplicate_images(self) -> None:
         db_path = self._make_db()
         try:
