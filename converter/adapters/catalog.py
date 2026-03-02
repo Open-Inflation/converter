@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+from time import sleep
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from sqlalchemy import (
@@ -22,10 +24,14 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from converter.core.models import NormalizedProductRecord
 from converter.core.ports import StorageRepository
+
+LOGGER = logging.getLogger(__name__)
+
 
 def _utc_now() -> datetime:
     return datetime.now(tz=timezone.utc)
@@ -434,6 +440,10 @@ class CatalogRepository:
         "package_quantity",
         "package_unit",
     )
+    _RETRYABLE_MYSQL_ERROR_CODES = {1205, 1213}
+    _TXN_RETRY_ATTEMPTS = 5
+    _TXN_RETRY_BASE_DELAY_SEC = 0.2
+    _TXN_RETRY_MAX_DELAY_SEC = 2.0
 
     def __init__(
         self,
@@ -461,9 +471,10 @@ class CatalogRepository:
         if not records:
             return
 
-        with self._session_factory() as session:
-            self._upsert_many_in_session(session, records)
-            session.commit()
+        self._run_write_transaction(
+            lambda session: self._upsert_many_in_session(session, records),
+            operation_name="upsert_many",
+        )
 
     def upsert_many_with_cursor(
         self,
@@ -473,7 +484,7 @@ class CatalogRepository:
         cursor_ingested_at: str,
         cursor_product_id: int,
     ) -> None:
-        with self._session_factory() as session:
+        def _work(session: Session) -> None:
             if records:
                 self._upsert_many_in_session(session, records)
             self._set_receiver_cursor_in_session(
@@ -482,7 +493,11 @@ class CatalogRepository:
                 ingested_at=cursor_ingested_at,
                 product_id=cursor_product_id,
             )
-            session.commit()
+
+        self._run_write_transaction(
+            _work,
+            operation_name="upsert_many_with_cursor",
+        )
 
     def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
         with self._session_factory() as session:
@@ -507,14 +522,65 @@ class CatalogRepository:
         ingested_at: str,
         product_id: int,
     ) -> None:
-        with self._session_factory() as session:
+        def _work(session: Session) -> None:
             self._set_receiver_cursor_in_session(
                 session,
                 parser_name,
                 ingested_at=ingested_at,
                 product_id=product_id,
             )
-            session.commit()
+
+        self._run_write_transaction(
+            _work,
+            operation_name="set_receiver_cursor",
+        )
+
+    def _run_write_transaction(
+        self,
+        work: Callable[[Session], None],
+        *,
+        operation_name: str,
+    ) -> None:
+        for attempt in range(1, self._TXN_RETRY_ATTEMPTS + 1):
+            try:
+                with self._session_factory() as session:
+                    work(session)
+                    session.commit()
+                return
+            except OperationalError as exc:
+                code = self._extract_mysql_error_code(exc)
+                if (
+                    code not in self._RETRYABLE_MYSQL_ERROR_CODES
+                    or attempt >= self._TXN_RETRY_ATTEMPTS
+                ):
+                    raise
+
+                delay = min(
+                    self._TXN_RETRY_BASE_DELAY_SEC * (2 ** (attempt - 1)),
+                    self._TXN_RETRY_MAX_DELAY_SEC,
+                )
+                LOGGER.warning(
+                    "Transient DB error on %s (mysql_code=%s, attempt=%s/%s). Retrying in %.2fs.",
+                    operation_name,
+                    code,
+                    attempt,
+                    self._TXN_RETRY_ATTEMPTS,
+                    delay,
+                )
+                sleep(delay)
+
+    @staticmethod
+    def _extract_mysql_error_code(exc: OperationalError) -> int | None:
+        original = getattr(exc, "orig", None)
+        args = getattr(original, "args", None)
+        if not isinstance(args, tuple) or not args:
+            return None
+        code = args[0]
+        if isinstance(code, int):
+            return code
+        if isinstance(code, str) and code.isdigit():
+            return int(code)
+        return None
 
     def _set_receiver_cursor_in_session(
         self,
