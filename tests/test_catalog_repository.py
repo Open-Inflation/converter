@@ -790,6 +790,56 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_upsert_normalizes_payload_categories_with_lemmatization_and_stopwords(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            raw = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-cat-norm:1",
+                sku="cat-norm-1",
+                title="Сок апельсиновый",
+                observed_at=datetime(2026, 2, 10, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-cat-norm",
+                    "receiver_artifact_id": 808,
+                    "receiver_product_id": 55,
+                    "receiver_categories": [
+                        {
+                            "uid": "cat-drinks",
+                            "title": "Напитки и соки",
+                            "depth": 0,
+                            "sort_order": 0,
+                        },
+                    ],
+                },
+            )
+
+            normalized = pipeline.process_one(raw)
+            repo.upsert_many([normalized])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    """
+                    SELECT source_uid, title, title_normalized
+                    FROM catalog_categories
+                    WHERE source_uid = ?
+                    """,
+                    ("cat-drinks",),
+                ).fetchone()
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertEqual(row["title"], "Напитки и соки")
+                self.assertEqual(row["title_normalized"], "напиток сок")
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_upsert_persists_geodata_from_artifact_coordinates_fallback(self) -> None:
         db_path = self._make_db()
         try:

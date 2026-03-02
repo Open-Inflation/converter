@@ -32,6 +32,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from converter.core.models import ChunkApplyResultV2, NormalizedProductRecord, SyncChunkV2
 from converter.core.ports import StorageRepository
+from converter.parsers.category_normalization import normalize_category_text
+from converter.parsers.normalizers import RussianTextNormalizer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -475,6 +477,7 @@ class CatalogRepository:
         self._storage_repository: StorageRepository | None = (
             storage_repository or self._build_storage_repository_from_env()
         )
+        self._category_text_normalizer = RussianTextNormalizer()
         _CatalogBase.metadata.create_all(self._engine)
         self._ensure_snapshot_interval_schema()
         self._ensure_product_sources_schema()
@@ -1736,7 +1739,7 @@ class CatalogRepository:
         for idx, item in enumerate(candidates):
             source_uid = _safe_str(item.get("uid"))
             title = _safe_str(item.get("title"))
-            title_normalized = self._normalize_text(title)
+            title_normalized = self._normalize_category_title(title)
 
             category_key = self._category_key(
                 parser_name=parser_name,
@@ -1785,6 +1788,16 @@ class CatalogRepository:
             len(out),
         )
         return out
+
+    def _normalize_category_title(self, value: str | None) -> str | None:
+        token = _safe_str(value)
+        if token is None:
+            return None
+
+        normalized = normalize_category_text(token, text_normalizer=self._category_text_normalizer)
+        if normalized is not None:
+            return normalized
+        return self._normalize_text(token)
 
     def _link_snapshot_categories(
         self,
