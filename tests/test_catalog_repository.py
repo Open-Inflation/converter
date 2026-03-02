@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
 
-from converter.adapters.catalog import _compact_payload_for_storage, _flatten_payload_nodes
 from converter import CatalogSQLiteRepository, build_default_pipeline
 from converter.core.models import NormalizedProductRecord, RawProductRecord
 from converter.core.ports import StorageRepository
@@ -50,7 +49,7 @@ class _DeadlockOnceCatalogRepository(CatalogSQLiteRepository):
         if self.injected_deadlocks == 0:
             self.injected_deadlocks += 1
             raise OperationalError(
-                "INSERT INTO catalog_product_payload_nodes (...) VALUES (...)",
+                "UPDATE catalog_products SET updated_at = ...",
                 {"product_id": 1},
                 RuntimeError(1213, "Deadlock found when trying to get lock; try restarting transaction"),
             )
@@ -62,28 +61,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()
         return Path(tmp.name)
-
-    @staticmethod
-    def _payload_nodes(
-        conn: sqlite3.Connection,
-        *,
-        table: str,
-        id_column: str,
-        row_id: int,
-    ) -> list[tuple[str, str, str | None]]:
-        rows = conn.execute(
-            f"""
-            SELECT path, node_type, value_text
-            FROM {table}
-            WHERE {id_column} = ?
-            ORDER BY path ASC
-            """,
-            (row_id,),
-        ).fetchall()
-        return [
-            (str(row["path"]), str(row["node_type"]), row["value_text"])
-            for row in rows
-        ]
 
     @staticmethod
     def _asset_values(
@@ -151,7 +128,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 }
                 self.assertIn("catalog_product_assets", tables)
                 self.assertIn("catalog_snapshot_assets", tables)
-                self.assertIn("catalog_product_payload_nodes", tables)
+                self.assertNotIn("catalog_product_payload_nodes", tables)
             finally:
                 conn.close()
         finally:
@@ -173,7 +150,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 },
                 "receiver_product_meta": [{"name": "Жирность", "value_text": "2.5%"}],
             }
-            compact_payload = _compact_payload_for_storage(payload)
 
             record = NormalizedProductRecord(
                 parser_name="fixprice",
@@ -216,13 +192,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(product["loyal_price"]), 129.9, places=3)
                 self.assertEqual(product["price_unit"], "RUB")
                 self.assertEqual(product["description"], "Тестовое описание")
-                product_nodes = self._payload_nodes(
-                    conn,
-                    table="catalog_product_payload_nodes",
-                    id_column="product_id",
-                    row_id=int(product["id"]),
-                )
-                self.assertEqual(sorted(product_nodes), sorted(_flatten_payload_nodes(compact_payload)))
                 self.assertEqual(
                     self._asset_values(
                         conn,
@@ -301,18 +270,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(product)
                 assert product is not None
-                nodes = self._payload_nodes(
-                    conn,
-                    table="catalog_product_payload_nodes",
-                    id_column="product_id",
-                    row_id=int(product["id"]),
-                )
-                self.assertEqual(
-                    dict((path, value_text) for path, _, value_text in nodes).get(
-                        "$/receiver_artifact/ingested_at"
-                    ),
-                    "2026-02-28T12:30:00+00:00",
-                )
+                product_payload_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_product_payload_nodes'"
+                ).fetchone()
+                self.assertIsNone(product_payload_table)
             finally:
                 conn.close()
         finally:
