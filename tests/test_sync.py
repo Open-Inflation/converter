@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from converter.core.models import NormalizedProductRecord, RawProductRecord
+from converter.core.models import ChunkApplyResultV2, NormalizedProductRecord, RawProductRecord, SyncChunkV2
 from converter.sync import ConverterSyncService, SyncJob
 
 
@@ -54,25 +54,28 @@ class _FakeCatalogRepository:
     def get_receiver_cursor(self, _parser_name: str):  # type: ignore[override]
         return None, None
 
-    def upsert_many_with_cursor(
+    def apply_chunk(
         self,
-        records,
-        *,
-        parser_name: str,
-        cursor_ingested_at: str,
-        cursor_product_id: int,
-    ) -> None:
-        self.calls.append((len(records), parser_name, cursor_ingested_at, cursor_product_id))
-
-    def upsert_many(self, _records) -> None:
-        raise AssertionError("fallback path should not be used when upsert_many_with_cursor is available")
-
-    def set_receiver_cursor(self, *_args, **_kwargs) -> None:
-        raise AssertionError("fallback path should not be used when upsert_many_with_cursor is available")
+        chunk: SyncChunkV2,
+    ) -> ChunkApplyResultV2:
+        self.calls.append(
+            (
+                len(chunk.records),
+                chunk.parser_name,
+                chunk.cursor_ingested_at,
+                chunk.cursor_product_id,
+            )
+        )
+        return ChunkApplyResultV2(
+            inserted_snapshots=len(chunk.records),
+            reused_snapshots=0,
+            upserted_products=len(chunk.records),
+            elapsed_ms=1,
+        )
 
 
 class ConverterSyncServiceTests(unittest.TestCase):
-    def test_run_splits_batch_into_transaction_subchunks(self) -> None:
+    def test_run_splits_batch_into_write_chunks(self) -> None:
         records: list[RawProductRecord] = []
         for idx in range(5):
             observed_at = datetime(2026, 2, 28, 10, idx, tzinfo=timezone.utc)
@@ -99,8 +102,8 @@ class ConverterSyncServiceTests(unittest.TestCase):
                     receiver_db="/tmp/receiver.db",
                     catalog_db="/tmp/catalog.db",
                     parser_name="fixprice",
-                    batch_size=120,
-                    txn_chunk_size=2,
+                    receiver_fetch_size=120,
+                    write_chunk_size=2,
                 )
             )
 

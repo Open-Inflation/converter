@@ -18,13 +18,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog-db", default="", help="Default catalog DB path or DSN")
     parser.add_argument("--parser-name", default="fixprice", help="Default parser_name")
 
-    parser.add_argument("--batch-size", type=int, default=250, help="Default batch size per queue job")
-    parser.add_argument(
-        "--txn-chunk-size",
-        type=int,
-        default=25,
-        help="Default transactional subchunk size inside each fetched batch",
-    )
+    parser.add_argument("--receiver-fetch-size", type=int, default=2000, help="Default receiver fetch size")
+    parser.add_argument("--write-chunk-size", type=int, default=1000, help="Default atomic write chunk size")
+    parser.add_argument("--sync-version", choices=("v2",), default="v2", help="Default sync version")
+    parser.add_argument("--writer-mode", choices=("mysql_v2",), default="mysql_v2", help="Default writer mode")
     parser.add_argument("--max-batches", type=int, default=0, help="Default max batches per queue job")
     parser.add_argument("--max-queue-size", type=int, default=100, help="Max queued jobs")
 
@@ -50,22 +47,26 @@ def main() -> None:
         default_receiver_db=(args.receiver_db or "").strip() or None,
         default_catalog_db=(args.catalog_db or "").strip() or None,
         default_parser_name=args.parser_name,
-        default_batch_size=args.batch_size,
-        default_txn_chunk_size=args.txn_chunk_size,
+        default_receiver_fetch_size=args.receiver_fetch_size,
+        default_write_chunk_size=args.write_chunk_size,
+        default_sync_version=args.sync_version,
+        default_writer_mode=args.writer_mode,
         default_max_batches=args.max_batches,
         auth_token=(args.auth_token or "").strip() or None,
     )
 
     LOGGER.info(
-        "Converter daemon started: listen=%s:%s default_receiver_db=%s default_catalog_db=%s default_parser=%s batch_size=%s max_batches=%s txn_chunk_size=%s auth_enabled=%s",
+        "Converter daemon started: listen=%s:%s default_receiver_db=%s default_catalog_db=%s default_parser=%s sync_version=%s writer_mode=%s receiver_fetch_size=%s write_chunk_size=%s max_batches=%s auth_enabled=%s",
         args.host,
         int(args.port),
         bool((args.receiver_db or "").strip()),
         bool((args.catalog_db or "").strip()),
         args.parser_name,
-        int(args.batch_size),
+        args.sync_version,
+        args.writer_mode,
+        int(args.receiver_fetch_size),
+        int(args.write_chunk_size),
         int(args.max_batches),
-        int(args.txn_chunk_size),
         bool((args.auth_token or "").strip()),
     )
 

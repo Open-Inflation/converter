@@ -22,9 +22,11 @@ class QueueJob:
     receiver_db: str
     catalog_db: str
     parser_name: str = "fixprice"
-    batch_size: int = 250
+    receiver_fetch_size: int = 2000
+    write_chunk_size: int = 1000
+    sync_version: str = "v2"
+    writer_mode: str = "mysql_v2"
     max_batches: int = 0
-    txn_chunk_size: int = 25
     run_id: str | None = None
     source: str = "receiver"
 
@@ -40,9 +42,11 @@ class QueueJob:
             receiver_db=self.receiver_db,
             catalog_db=self.catalog_db,
             parser_name=self.parser_name,
-            batch_size=self.batch_size,
+            receiver_fetch_size=self.receiver_fetch_size,
+            write_chunk_size=self.write_chunk_size,
+            sync_version=self.sync_version,
+            writer_mode=self.writer_mode,
             max_batches=self.max_batches,
-            txn_chunk_size=self.txn_chunk_size,
         )
 
 
@@ -114,13 +118,15 @@ class ConverterDaemon:
     def enqueue(self, job: QueueJob) -> EnqueueResult:
         key = job.dedupe_key()
         LOGGER.debug(
-            "Queue enqueue requested: key=%s run_id=%s source=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            "Queue enqueue requested: key=%s run_id=%s source=%s sync_version=%s writer_mode=%s receiver_fetch_size=%s write_chunk_size=%s max_batches=%s",
             key,
             job.run_id,
             job.source,
-            job.batch_size,
+            job.sync_version,
+            job.writer_mode,
+            job.receiver_fetch_size,
+            job.write_chunk_size,
             job.max_batches,
-            job.txn_chunk_size,
         )
 
         with self._lock:
@@ -253,22 +259,38 @@ class ConverterDaemon:
     def _run_job(self, job: QueueJob) -> JobExecution:
         started_at = monotonic()
         LOGGER.info(
-            "Sync job execution started: parser=%s run_id=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            "Sync job execution started: parser=%s run_id=%s sync_version=%s writer_mode=%s receiver_fetch_size=%s write_chunk_size=%s max_batches=%s",
             job.parser_name,
             job.run_id,
-            job.batch_size,
+            job.sync_version,
+            job.writer_mode,
+            job.receiver_fetch_size,
+            job.write_chunk_size,
             job.max_batches,
-            job.txn_chunk_size,
         )
         try:
             outcome = self._sync_service.run(job.to_sync_job())
+            outbox_result: dict[str, int] | None = None
+            drain_outbox = getattr(self._sync_service, "process_storage_delete_outbox", None)
+            if callable(drain_outbox):
+                try:
+                    outbox_result = drain_outbox(job.catalog_db, limit=200)
+                except Exception:
+                    LOGGER.exception(
+                        "Storage delete outbox drain failed: parser=%s run_id=%s",
+                        job.parser_name,
+                        job.run_id,
+                    )
             LOGGER.info(
-                "Sync job execution finished: parser=%s run_id=%s success=true batches=%s processed=%s elapsed_sec=%.3f",
+                "Sync job execution finished: parser=%s run_id=%s success=true batches=%s processed=%s elapsed_sec=%.3f outbox_processed=%s outbox_deleted=%s outbox_failed=%s",
                 job.parser_name,
                 job.run_id,
                 outcome.batches,
                 outcome.total_processed,
                 monotonic() - started_at,
+                None if outbox_result is None else outbox_result.get("processed"),
+                None if outbox_result is None else outbox_result.get("deleted"),
+                None if outbox_result is None else outbox_result.get("failed"),
             )
             return JobExecution(job=job, success=True, error=None, outcome=outcome)
         except Exception as exc:
@@ -293,9 +315,11 @@ class ConverterDaemonHTTPServer(ThreadingHTTPServer):
         default_receiver_db: str | None = None,
         default_catalog_db: str | None = None,
         default_parser_name: str = "fixprice",
-        default_batch_size: int = 250,
+        default_receiver_fetch_size: int = 2000,
+        default_write_chunk_size: int = 1000,
+        default_sync_version: str = "v2",
+        default_writer_mode: str = "mysql_v2",
         default_max_batches: int = 0,
-        default_txn_chunk_size: int = 25,
         auth_token: str | None = None,
     ) -> None:
         super().__init__(server_address, request_handler_cls)
@@ -303,9 +327,11 @@ class ConverterDaemonHTTPServer(ThreadingHTTPServer):
         self.default_receiver_db = (default_receiver_db or "").strip() or None
         self.default_catalog_db = (default_catalog_db or "").strip() or None
         self.default_parser_name = default_parser_name.strip() or "fixprice"
-        self.default_batch_size = max(1, int(default_batch_size))
+        self.default_receiver_fetch_size = max(1, int(default_receiver_fetch_size))
+        self.default_write_chunk_size = max(1, int(default_write_chunk_size))
+        self.default_sync_version = (default_sync_version or "").strip() or "v2"
+        self.default_writer_mode = (default_writer_mode or "").strip() or "mysql_v2"
         self.default_max_batches = max(0, int(default_max_batches))
-        self.default_txn_chunk_size = max(1, int(default_txn_chunk_size))
         self.auth_token = (auth_token or "").strip() or None
 
 
@@ -347,6 +373,16 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
         parser_name = _first_non_empty(payload.get("parser_name"), self.server.default_parser_name) or "fixprice"
         run_id = _first_non_empty(payload.get("run_id"), None)
         source = _first_non_empty(payload.get("source"), "receiver") or "receiver"
+        sync_version = _first_non_empty(payload.get("sync_version"), self.server.default_sync_version) or "v2"
+        writer_mode = _first_non_empty(payload.get("writer_mode"), self.server.default_writer_mode) or "mysql_v2"
+        if sync_version.strip().lower() != "v2":
+            LOGGER.warning("HTTP rejected request: unsupported sync_version=%s", sync_version)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "unsupported sync_version, expected 'v2'"})
+            return
+        if writer_mode.strip().lower() != "mysql_v2":
+            LOGGER.warning("HTTP rejected request: unsupported writer_mode=%s", writer_mode)
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "unsupported writer_mode, expected 'mysql_v2'"})
+            return
 
         if receiver_db is None:
             LOGGER.warning("HTTP rejected request: receiver_db is required (path=%s client=%s)", path, self.address_string())
@@ -356,22 +392,35 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
             LOGGER.warning("HTTP rejected request: catalog_db is required (path=%s client=%s)", path, self.address_string())
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "catalog_db is required"})
             return
+        if "batch_size" in payload or "txn_chunk_size" in payload:
+            LOGGER.warning("HTTP rejected request: legacy payload fields are not supported")
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "legacy payload fields are not supported; use receiver_fetch_size/write_chunk_size"},
+            )
+            return
 
-        batch_size = _to_int(payload.get("batch_size"), default=self.server.default_batch_size, minimum=1)
-        max_batches = _to_int(payload.get("max_batches"), default=self.server.default_max_batches, minimum=0)
-        txn_chunk_size = _to_int(
-            payload.get("txn_chunk_size"),
-            default=self.server.default_txn_chunk_size,
+        receiver_fetch_size = _to_int(
+            payload.get("receiver_fetch_size"),
+            default=self.server.default_receiver_fetch_size,
             minimum=1,
         )
+        write_chunk_size = _to_int(
+            payload.get("write_chunk_size"),
+            default=self.server.default_write_chunk_size,
+            minimum=1,
+        )
+        max_batches = _to_int(payload.get("max_batches"), default=self.server.default_max_batches, minimum=0)
 
         job = QueueJob(
             receiver_db=receiver_db,
             catalog_db=catalog_db,
             parser_name=parser_name,
-            batch_size=batch_size,
+            receiver_fetch_size=receiver_fetch_size,
+            write_chunk_size=write_chunk_size,
+            sync_version=sync_version,
+            writer_mode=writer_mode,
             max_batches=max_batches,
-            txn_chunk_size=txn_chunk_size,
             run_id=run_id,
             source=source,
         )

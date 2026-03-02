@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import logging
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from .adapters import (
     CatalogMySQLRepository,
@@ -15,7 +17,7 @@ from .adapters import (
     ReceiverSQLiteRepository,
     is_mysql_dsn,
 )
-from .core.models import RawProductRecord
+from .core.models import RawProductRecord, SyncChunkV2
 from .core.registry import HandlerRegistry
 from .parsers import register_builtin_handlers
 
@@ -28,9 +30,11 @@ class SyncJob:
     receiver_db: str
     catalog_db: str
     parser_name: str = "fixprice"
-    batch_size: int = 250
+    receiver_fetch_size: int = 2000
+    write_chunk_size: int = 1000
+    sync_version: str = "v2"
+    writer_mode: str = "mysql_v2"
     max_batches: int = 0
-    txn_chunk_size: int = 25
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +94,37 @@ def _to_int(value: object) -> int | None:
         return None
 
 
+def _chunk_id(
+    parser_name: str,
+    cursor_ingested_at: str,
+    cursor_product_id: int,
+    records: list[RawProductRecord],
+) -> str:
+    if not records:
+        return f"{parser_name}:{cursor_ingested_at}:{cursor_product_id}:{uuid4().hex}"
+
+    source_tokens: list[str] = []
+    for item in records:
+        if item.source_id:
+            source_tokens.append(item.source_id.strip())
+    source_tokens = [token for token in source_tokens if token]
+
+    first_source = source_tokens[0] if source_tokens else ""
+    last_source = source_tokens[-1] if source_tokens else ""
+    seed = "|".join(
+        (
+            parser_name.strip().lower(),
+            cursor_ingested_at,
+            str(int(cursor_product_id)),
+            str(len(records)),
+            first_source,
+            last_source,
+        )
+    )
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    return f"{parser_name.strip().lower()}:{cursor_ingested_at}:{cursor_product_id}:{digest}"
+
+
 def build_receiver_repository(dsn_or_path: str) -> Any:
     token = dsn_or_path.strip()
     if is_mysql_dsn(token):
@@ -134,22 +169,33 @@ class ConverterSyncService:
     ) -> SyncOutcome:
         started_at = monotonic()
         parser_name = job.parser_name.strip() or "fixprice"
-        batch_size = max(1, int(job.batch_size))
+        receiver_fetch_size = max(1, int(job.receiver_fetch_size))
+        write_chunk_size = max(1, int(job.write_chunk_size))
         max_batches = max(0, int(job.max_batches))
-        txn_chunk_size = max(1, int(job.txn_chunk_size))
+        sync_version = (job.sync_version or "").strip().lower() or "v2"
+        writer_mode = (job.writer_mode or "").strip().lower() or "mysql_v2"
+        if sync_version != "v2":
+            raise ValueError(f"Unsupported sync_version: {sync_version!r}. Only 'v2' is supported.")
+        if writer_mode != "mysql_v2":
+            raise ValueError(f"Unsupported writer_mode: {writer_mode!r}. Only 'mysql_v2' is supported.")
 
         LOGGER.info(
-            "Sync started: parser=%s receiver=%s catalog=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            "Sync started: parser=%s receiver=%s catalog=%s sync_version=%s writer_mode=%s receiver_fetch_size=%s write_chunk_size=%s max_batches=%s",
             parser_name,
             _safe_db_ref(job.receiver_db),
             _safe_db_ref(job.catalog_db),
-            batch_size,
+            sync_version,
+            writer_mode,
+            receiver_fetch_size,
+            write_chunk_size,
             max_batches,
-            txn_chunk_size,
         )
 
         receiver_repo = build_receiver_repository(job.receiver_db)
         catalog_repo = build_catalog_repository(job.catalog_db)
+        apply_chunk = getattr(catalog_repo, "apply_chunk", None)
+        if not callable(apply_chunk):
+            raise RuntimeError("Catalog repository does not support v2 apply_chunk API")
 
         watermark_ingested_at, watermark_product_id = catalog_repo.get_receiver_cursor(parser_name)
         LOGGER.info(
@@ -180,7 +226,7 @@ class ConverterSyncService:
                 watermark_product_id,
             )
             raw_records = receiver_repo.fetch_batch(
-                limit=batch_size,
+                limit=receiver_fetch_size,
                 parser_name=parser_name,
                 after_ingested_at=watermark_ingested_at,
                 after_product_id=watermark_product_id,
@@ -200,14 +246,13 @@ class ConverterSyncService:
                 next_batch_number,
                 len(raw_records),
             )
-            upsert_with_cursor = getattr(catalog_repo, "upsert_many_with_cursor", None)
-            for chunk_start in range(0, len(raw_records), txn_chunk_size):
-                raw_chunk = raw_records[chunk_start : chunk_start + txn_chunk_size]
+            for chunk_start in range(0, len(raw_records), write_chunk_size):
+                raw_chunk = raw_records[chunk_start : chunk_start + write_chunk_size]
                 LOGGER.debug(
                     "Sync processing chunk: parser=%s batch_number=%s chunk_index=%s chunk_size=%s",
                     parser_name,
                     next_batch_number,
-                    (chunk_start // txn_chunk_size) + 1,
+                    (chunk_start // write_chunk_size) + 1,
                     len(raw_chunk),
                 )
                 try:
@@ -217,30 +262,34 @@ class ConverterSyncService:
                         "Sync normalization failed: parser=%s batch_number=%s chunk_index=%s",
                         parser_name,
                         next_batch_number,
-                        (chunk_start // txn_chunk_size) + 1,
+                        (chunk_start // write_chunk_size) + 1,
                     )
                     raise
                 chunk_ingested_at, chunk_product_id = _cursor_from_records(raw_chunk)
 
-                if callable(upsert_with_cursor):
-                    upsert_with_cursor(
-                        normalized,
-                        parser_name=parser_name,
-                        cursor_ingested_at=chunk_ingested_at,
-                        cursor_product_id=chunk_product_id,
-                    )
-                else:
-                    catalog_repo.upsert_many(normalized)
-                    catalog_repo.set_receiver_cursor(
-                        parser_name,
-                        ingested_at=chunk_ingested_at,
-                        product_id=chunk_product_id,
-                    )
+                chunk = SyncChunkV2(
+                    parser_name=parser_name,
+                    chunk_id=_chunk_id(parser_name, chunk_ingested_at, chunk_product_id, raw_chunk),
+                    records=normalized,
+                    cursor_ingested_at=chunk_ingested_at,
+                    cursor_product_id=chunk_product_id,
+                )
+                outcome = apply_chunk(chunk)
+                LOGGER.debug(
+                    "Sync apply_chunk done: parser=%s batch_number=%s chunk_index=%s inserted_snapshots=%s reused_snapshots=%s upserted_products=%s elapsed_ms=%s",
+                    parser_name,
+                    next_batch_number,
+                    (chunk_start // write_chunk_size) + 1,
+                    getattr(outcome, "inserted_snapshots", None),
+                    getattr(outcome, "reused_snapshots", None),
+                    getattr(outcome, "upserted_products", None),
+                    getattr(outcome, "elapsed_ms", None),
+                )
                 LOGGER.debug(
                     "Sync chunk committed: parser=%s batch_number=%s chunk_index=%s cursor_ingested_at=%s cursor_product_id=%s",
                     parser_name,
                     next_batch_number,
-                    (chunk_start // txn_chunk_size) + 1,
+                    (chunk_start // write_chunk_size) + 1,
                     chunk_ingested_at,
                     chunk_product_id,
                 )
@@ -285,3 +334,22 @@ class ConverterSyncService:
             outcome.cursor_product_id,
         )
         return outcome
+
+    @staticmethod
+    def process_storage_delete_outbox(
+        catalog_db: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, int]:
+        catalog_repo = build_catalog_repository(catalog_db)
+        handler = getattr(catalog_repo, "process_storage_delete_outbox", None)
+        if not callable(handler):
+            return {"processed": 0, "deleted": 0, "failed": 0}
+        result = handler(limit=max(1, int(limit)))
+        if not isinstance(result, dict):
+            return {"processed": 0, "deleted": 0, "failed": 0}
+        return {
+            "processed": int(result.get("processed", 0)),
+            "deleted": int(result.get("deleted", 0)),
+            "failed": int(result.get("failed", 0)),
+        }

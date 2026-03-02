@@ -136,3 +136,20 @@ class NormalizedProductRecord:
             if value and value.strip():
                 out.append((key_name, value.strip()))
         return out
+
+
+@dataclass(frozen=True, slots=True)
+class SyncChunkV2:
+    parser_name: str
+    chunk_id: str
+    records: list[NormalizedProductRecord]
+    cursor_ingested_at: str
+    cursor_product_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkApplyResultV2:
+    inserted_snapshots: int
+    reused_snapshots: int
+    upserted_products: int
+    elapsed_ms: int

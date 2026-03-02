@@ -534,7 +534,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_upsert_many_retries_on_mysql_duplicate_key(self) -> None:
+    def test_upsert_many_does_not_retry_on_mysql_duplicate_key(self) -> None:
         db_path = self._make_db()
         try:
             repo = _DuplicateKeyOnceCatalogRepository(db_path)
@@ -555,7 +555,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             )
 
             with patch("converter.adapters.catalog.sleep", return_value=None):
-                repo.upsert_many([record])
+                with self.assertRaises(IntegrityError):
+                    repo.upsert_many([record])
 
             self.assertEqual(repo.injected_duplicate_keys, 1)
 
@@ -567,7 +568,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ("receiver:run-dupkey:1",),
                 ).fetchone()
                 assert products is not None
-                self.assertEqual(int(products["cnt"]), 1)
+                self.assertEqual(int(products["cnt"]), 0)
             finally:
                 conn.close()
         finally:
@@ -627,6 +628,88 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ("fixprice", "normalized_name", "тарелка десертный o kit"),
                 ).fetchone()
                 self.assertEqual(int(normalized_rows["cnt"]), 1)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_reuses_snapshot_when_payload_is_unchanged(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            first_observed = datetime(2026, 2, 28, 10, 0, tzinfo=timezone.utc)
+            second_observed = datetime(2026, 2, 28, 11, 0, tzinfo=timezone.utc)
+
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Сыр плавленый",
+                title_normalized="сыр плавленый",
+                title_original_no_stopwords="сыр плавленый",
+                title_normalized_no_stopwords="сыр плавленый",
+                brand="TestBrand",
+                unit="PCE",
+                available_count=10.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-stable:1",
+                sku="stable-1",
+                price=99.9,
+                discount_price=79.9,
+                loyal_price=69.9,
+                price_unit="RUB",
+                image_urls=["https://cdn.example/stable-1.jpg"],
+                observed_at=first_observed,
+                source_payload={
+                    "receiver_run_id": "run-1",
+                    "receiver_product_id": 1001,
+                    "receiver_artifact_id": 2001,
+                },
+            )
+            second = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Сыр плавленый",
+                title_normalized="сыр плавленый",
+                title_original_no_stopwords="сыр плавленый",
+                title_normalized_no_stopwords="сыр плавленый",
+                brand="TestBrand",
+                unit="PCE",
+                available_count=10.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-stable:1",
+                sku="stable-1",
+                price=99.9,
+                discount_price=79.9,
+                loyal_price=69.9,
+                price_unit="RUB",
+                image_urls=["https://cdn.example/stable-1.jpg"],
+                observed_at=second_observed,
+                source_payload={
+                    "receiver_run_id": "run-2",
+                    "receiver_product_id": 1002,
+                    "receiver_artifact_id": 2002,
+                },
+            )
+
+            repo.upsert_many([first])
+            repo.upsert_many([second])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                snapshots = conn.execute(
+                    """
+                    SELECT id, content_fingerprint, valid_from_at, valid_to_at
+                    FROM catalog_product_snapshots
+                    WHERE parser_name = ? AND source_id = ?
+                    ORDER BY id ASC
+                    """,
+                    ("fixprice", "receiver:run-stable:1"),
+                ).fetchall()
+                self.assertEqual(len(snapshots), 1)
+                self.assertIsNotNone(snapshots[0]["content_fingerprint"])
+                self.assertIn("2026-02-28 10:00:00", str(snapshots[0]["valid_from_at"]))
+                self.assertIn("2026-02-28 11:00:00", str(snapshots[0]["valid_to_at"]))
             finally:
                 conn.close()
         finally:
@@ -782,6 +865,11 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
             repo.upsert_many([record])
 
+            self.assertEqual(storage.deleted_batches, [])
+            outbox_result = repo.process_storage_delete_outbox(limit=10)
+            self.assertEqual(outbox_result["processed"], 1)
+            self.assertEqual(outbox_result["deleted"], 1)
+            self.assertEqual(outbox_result["failed"], 0)
             self.assertEqual(storage.deleted_batches, [["http://storage.local/images/dup.webp"]])
         finally:
             db_path.unlink(missing_ok=True)

@@ -122,8 +122,9 @@ python3 sync_receiver_to_catalog.py \
   --receiver-db ../receiver/data/receiver.db \
   --catalog-db ./data/catalog.db \
   --parser-name fixprice \
-  --batch-size 250 \
-  --txn-chunk-size 25
+  --receiver-fetch-size 2000 \
+  --write-chunk-size 1000 \
+  --sync-version v2
 ```
 
 Полный sync `receiver -> catalog` (MySQL):
@@ -134,18 +135,19 @@ python3 sync_receiver_to_catalog.py \
   --receiver-db 'mysql+pymysql://user:pass@127.0.0.1:3306/receiver' \
   --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog' \
   --parser-name fixprice \
-  --batch-size 250 \
-  --txn-chunk-size 25
+  --receiver-fetch-size 2000 \
+  --write-chunk-size 1000 \
+  --sync-version v2
 ```
 
 ### Очистка дублей изображений в storage
 
-Конвертер может удалять duplicate image URLs сразу в момент `upsert_many`:
+Конвертер удаляет duplicate image URLs через async outbox:
 
 - `CONVERTER_STORAGE_BASE_URL` (или `STORAGE_BASE_URL`) — базовый URL storage.
 - `CONVERTER_STORAGE_API_TOKEN` (или `STORAGE_API_TOKEN`) — токен `Bearer`.
 - `CONVERTER_STORAGE_DELETE_TIMEOUT_SEC` — timeout `DELETE` запроса (по умолчанию `10`).
-- `CONVERTER_STORAGE_DELETE_STRICT` — если `1/true`, ошибка удаления прерывает обработку.
+- ошибка удаления больше не прерывает `apply_chunk`, обработка идет через retry в outbox worker.
 
 Удаление выполняется только для URL текущего storage origin и путей `/images/<name>`.
 
@@ -160,8 +162,10 @@ python3 converter_daemon.py \
   --receiver-db ../receiver/data/receiver.db \
   --catalog-db ./data/catalog.db \
   --parser-name fixprice \
-  --batch-size 250 \
-  --txn-chunk-size 25 \
+  --receiver-fetch-size 2000 \
+  --write-chunk-size 1000 \
+  --sync-version v2 \
+  --writer-mode mysql_v2 \
   --max-queue-size 100
 ```
 
@@ -175,11 +179,11 @@ HTTP точки:
 ```bash
 curl -X POST http://127.0.0.1:8090/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver","txn_chunk_size":25}'
+  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver","receiver_fetch_size":2000,"write_chunk_size":1000,"sync_version":"v2","writer_mode":"mysql_v2"}'
 ```
 
-`txn_chunk_size` задаёт размер микротранзакции внутри одного fetch-batch:
-`upsert + cursor` коммитятся вместе на каждый subchunk.
+`write_chunk_size` задаёт атомарный размер `apply_chunk`.
+Legacy-поля payload (`batch_size`, `txn_chunk_size`) не поддерживаются.
 
 Дедупликация очереди выполняется по ключу `(receiver_db, catalog_db, parser_name)`:
 пока задача с тем же ключом в pending/active, повторный trigger не создаст дубль.
@@ -195,7 +199,8 @@ curl -X POST http://127.0.0.1:8090/trigger \
 - `CONVERTER_TRIGGER_TIMEOUT_SEC` — timeout запроса (по умолчанию `3`).
 - `CONVERTER_TRIGGER_RECEIVER_DB` — опционально переопределяет `receiver_db` в payload.
 - `CONVERTER_TRIGGER_CATALOG_DB` — опционально переопределяет `catalog_db` в payload.
-- `CONVERTER_TRIGGER_BATCH_SIZE` — опционально переопределяет batch size.
+- `CONVERTER_TRIGGER_RECEIVER_FETCH_SIZE` — опционально переопределяет `receiver_fetch_size`.
+- `CONVERTER_TRIGGER_WRITE_CHUNK_SIZE` — опционально переопределяет `write_chunk_size`.
 - `CONVERTER_TRIGGER_MAX_BATCHES` — опционально ограничивает число batch-ов за один trigger.
 
 ## Как расширять

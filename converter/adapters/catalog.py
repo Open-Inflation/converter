@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 from time import sleep
 from time import monotonic
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -23,12 +24,13 @@ from sqlalchemy import (
     inspect,
     insert,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-from converter.core.models import NormalizedProductRecord
+from converter.core.models import ChunkApplyResultV2, NormalizedProductRecord, SyncChunkV2
 from converter.core.ports import StorageRepository
 
 LOGGER = logging.getLogger(__name__)
@@ -123,6 +125,14 @@ class _CatalogProduct(_CatalogBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    __table_args__ = (
+        UniqueConstraint(
+            "parser_name",
+            "source_id",
+            name="uq_catalog_products_source",
+        ),
+    )
+
 
 class _CatalogProductSnapshot(_CatalogBase):
     __tablename__ = "catalog_product_snapshots"
@@ -174,9 +184,21 @@ class _CatalogProductSnapshot(_CatalogBase):
 
     settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    source_event_uid: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    valid_from_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    valid_to_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_event_uid",
+            name="uq_cps_event",
+        ),
+    )
 
 
 class _CatalogProductSource(_CatalogBase):
@@ -187,6 +209,7 @@ class _CatalogProductSource(_CatalogBase):
 
     canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     latest_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latest_content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -339,6 +362,87 @@ class _ConverterSyncState(_CatalogBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class _CatalogIngestStageProduct(_CatalogBase):
+    __tablename__ = "catalog_ingest_stage_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    row_no: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_product_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_event_uid: Mapped[str] = mapped_column(String(191), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    receiver_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "chunk_id",
+            "row_no",
+            name="uq_catalog_stage_products_chunk_row",
+        ),
+    )
+
+
+class _CatalogIngestStageAsset(_CatalogBase):
+    __tablename__ = "catalog_ingest_stage_assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "chunk_id",
+            "parser_name",
+            "source_id",
+            "asset_kind",
+            "sort_order",
+            "value",
+            name="uq_catalog_stage_assets_entry",
+        ),
+    )
+
+
+class _CatalogIngestStageCategory(_CatalogBase):
+    __tablename__ = "catalog_ingest_stage_categories"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    alias: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class _CatalogStorageDeleteOutbox(_CatalogBase):
+    __tablename__ = "catalog_storage_delete_outbox"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    image_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class CatalogRepository:
     """
     SQLAlchemy-based persistent sink for normalized catalog products.
@@ -359,7 +463,7 @@ class CatalogRepository:
         "package_unit",
     )
     _RETRYABLE_MYSQL_OPERATIONAL_ERROR_CODES = {1205, 1213}
-    _RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES = {1062}
+    _RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES: set[int] = set()
     _TXN_RETRY_ATTEMPTS = 5
     _TXN_RETRY_BASE_DELAY_SEC = 0.2
     _TXN_RETRY_MAX_DELAY_SEC = 2.0
@@ -384,6 +488,10 @@ class CatalogRepository:
             storage_repository or self._build_storage_repository_from_env()
         )
         _CatalogBase.metadata.create_all(self._engine)
+        self._ensure_snapshot_interval_schema()
+        self._ensure_product_sources_schema()
+        self._ensure_snapshot_event_schema()
+        self._ensure_catalog_products_constraints()
         self._validate_catalog_products_schema()
         LOGGER.info(
             "Catalog repository initialized: dialect=%s storage_delete_enabled=%s",
@@ -445,6 +553,111 @@ class CatalogRepository:
             parser_name,
             monotonic() - started_at,
         )
+
+    def apply_chunk(self, chunk: SyncChunkV2) -> ChunkApplyResultV2:
+        started_at = monotonic()
+        counters = {
+            "inserted_snapshots": 0,
+            "reused_snapshots": 0,
+            "upserted_products": 0,
+        }
+        LOGGER.debug(
+            "Catalog apply_chunk started: parser=%s chunk_id=%s records=%s cursor_ingested_at=%s cursor_product_id=%s",
+            chunk.parser_name,
+            chunk.chunk_id,
+            len(chunk.records),
+            chunk.cursor_ingested_at,
+            chunk.cursor_product_id,
+        )
+
+        def _work(session: Session) -> None:
+            self._stage_chunk_in_session(session, chunk)
+            for record in chunk.records:
+                counters["upserted_products"] += 1
+                canonical_product_id = self._resolve_canonical_product_id(session, record)
+                record.canonical_product_id = canonical_product_id
+
+                self._apply_persistent_image_dedup(session, record)
+                payload = self._source_payload(record)
+                snapshot_fingerprint = self._snapshot_content_fingerprint(record, payload=payload)
+                source_event_uid = self._source_event_uid(record, payload=payload)
+
+                touched_snapshot = self._touch_latest_snapshot_if_unchanged(
+                    session,
+                    record,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                )
+                if touched_snapshot:
+                    counters["reused_snapshots"] += 1
+                    self._update_source_fingerprint_in_session(
+                        session,
+                        record=record,
+                        snapshot_fingerprint=snapshot_fingerprint,
+                    )
+                    continue
+
+                settlement = self._upsert_settlement(session, record, payload=payload)
+                snapshot, inserted = self._insert_product_snapshot(
+                    session,
+                    record,
+                    settlement=settlement,
+                    payload=payload,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                    source_event_uid=source_event_uid,
+                )
+                if inserted:
+                    counters["inserted_snapshots"] += 1
+
+                self._append_settlement_geodata(
+                    session,
+                    settlement=settlement,
+                    record=record,
+                    payload=payload,
+                )
+                categories = self._upsert_categories(session, record, payload=payload)
+                self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
+                self._upsert_product_source(
+                    session,
+                    record,
+                    snapshot=snapshot,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                )
+                self._upsert_product_row(
+                    session,
+                    record,
+                    settlement=settlement,
+                    categories=categories,
+                )
+
+            self._set_receiver_cursor_in_session(
+                session,
+                chunk.parser_name,
+                ingested_at=chunk.cursor_ingested_at,
+                product_id=chunk.cursor_product_id,
+            )
+            self._clear_stage_chunk_in_session(session, chunk.chunk_id)
+
+        self._run_write_transaction(
+            _work,
+            operation_name="apply_chunk",
+        )
+        elapsed_ms = int((monotonic() - started_at) * 1000)
+        result = ChunkApplyResultV2(
+            inserted_snapshots=int(counters["inserted_snapshots"]),
+            reused_snapshots=int(counters["reused_snapshots"]),
+            upserted_products=int(counters["upserted_products"]),
+            elapsed_ms=elapsed_ms,
+        )
+        LOGGER.info(
+            "Catalog apply_chunk finished: parser=%s chunk_id=%s inserted_snapshots=%s reused_snapshots=%s upserted_products=%s elapsed_ms=%s",
+            chunk.parser_name,
+            chunk.chunk_id,
+            result.inserted_snapshots,
+            result.reused_snapshots,
+            result.upserted_products,
+            result.elapsed_ms,
+        )
+        return result
 
     def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
         with self._session_factory() as session:
@@ -522,10 +735,8 @@ class CatalogRepository:
                     isinstance(exc, IntegrityError)
                     and code in self._RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES
                 )
-                if (
-                    not is_retryable_operational
-                    and not is_retryable_integrity
-                    or attempt >= self._TXN_RETRY_ATTEMPTS
+                if (not is_retryable_operational and not is_retryable_integrity) or (
+                    attempt >= self._TXN_RETRY_ATTEMPTS
                 ):
                     raise
 
@@ -586,6 +797,30 @@ class CatalogRepository:
             )
             return
 
+        current_ingested_at: str | None = None
+        current_product_id: int | None = None
+        token = _safe_str(row.value)
+        if token and "\t" in token:
+            current_ingested_at_raw, current_product_id_raw = token.rsplit("\t", 1)
+            current_ingested_at = _safe_str(current_ingested_at_raw)
+            current_product_id = self._to_int(current_product_id_raw)
+
+        if not self._is_cursor_after(
+            new_ingested_at=ingested_at,
+            new_product_id=product_id,
+            current_ingested_at=current_ingested_at,
+            current_product_id=current_product_id,
+        ):
+            LOGGER.debug(
+                "Catalog cursor update skipped (non-monotonic): parser=%s current=(%s,%s) new=(%s,%s)",
+                parser_name,
+                current_ingested_at,
+                current_product_id,
+                ingested_at,
+                product_id,
+            )
+            return
+
         row.value = encoded
         row.updated_at = now
         LOGGER.debug(
@@ -594,6 +829,22 @@ class CatalogRepository:
             ingested_at,
             product_id,
         )
+
+    @staticmethod
+    def _is_cursor_after(
+        *,
+        new_ingested_at: str,
+        new_product_id: int,
+        current_ingested_at: str | None,
+        current_product_id: int | None,
+    ) -> bool:
+        if current_ingested_at is None:
+            return True
+        if new_ingested_at > current_ingested_at:
+            return True
+        if new_ingested_at < current_ingested_at:
+            return False
+        return int(new_product_id) > int(current_product_id or 0)
 
     def _upsert_many_in_session(
         self,
@@ -609,13 +860,25 @@ class CatalogRepository:
             self._apply_backfill(session, record)
 
             payload = self._source_payload(record)
+            snapshot_fingerprint = self._snapshot_content_fingerprint(record, payload=payload)
+            source_event_uid = self._source_event_uid(record, payload=payload)
+
+            touched_snapshot = self._touch_latest_snapshot_if_unchanged(
+                session,
+                record,
+                snapshot_fingerprint=snapshot_fingerprint,
+            )
+            if touched_snapshot:
+                continue
 
             settlement = self._upsert_settlement(session, record, payload=payload)
-            snapshot = self._insert_product_snapshot(
+            snapshot, _ = self._insert_product_snapshot(
                 session,
                 record,
                 settlement=settlement,
                 payload=payload,
+                snapshot_fingerprint=snapshot_fingerprint,
+                source_event_uid=source_event_uid,
             )
             self._append_settlement_geodata(
                 session,
@@ -627,7 +890,12 @@ class CatalogRepository:
             categories = self._upsert_categories(session, record, payload=payload)
             self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
 
-            self._upsert_product_source(session, record, snapshot=snapshot)
+            self._upsert_product_source(
+                session,
+                record,
+                snapshot=snapshot,
+                snapshot_fingerprint=snapshot_fingerprint,
+            )
             self._upsert_product_row(
                 session,
                 record,
@@ -635,6 +903,89 @@ class CatalogRepository:
                 categories=categories,
             )
         LOGGER.debug("Catalog session upsert completed: records=%s", len(records))
+
+    def _stage_chunk_in_session(self, session: Session, chunk: SyncChunkV2) -> None:
+        self._clear_stage_chunk_in_session(session, chunk.chunk_id)
+
+        now = _utc_now()
+        product_rows: list[dict[str, Any]] = []
+        asset_rows: list[dict[str, Any]] = []
+        category_rows: list[dict[str, Any]] = []
+
+        for row_no, record in enumerate(chunk.records):
+            payload = self._source_payload(record)
+            source_id = self._source_id(record)
+            product_rows.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "row_no": int(row_no),
+                    "parser_name": record.parser_name,
+                    "source_id": source_id,
+                    "canonical_product_id": _safe_str(record.canonical_product_id),
+                    "content_fingerprint": self._snapshot_content_fingerprint(record, payload=payload),
+                    "source_event_uid": self._source_event_uid(record, payload=payload),
+                    "observed_at": self._to_utc(record.observed_at),
+                    "receiver_product_id": self._to_int(payload.get("receiver_product_id")),
+                    "receiver_artifact_id": self._to_int(payload.get("receiver_artifact_id")),
+                    "created_at": now,
+                }
+            )
+
+            for asset_kind, values in self._iter_asset_values(record):
+                for idx, value in enumerate(values):
+                    asset_rows.append(
+                        {
+                            "chunk_id": chunk.chunk_id,
+                            "parser_name": record.parser_name,
+                            "source_id": source_id,
+                            "asset_kind": asset_kind,
+                            "sort_order": int(idx),
+                            "value": str(value),
+                            "created_at": now,
+                        }
+                    )
+
+            candidates = self._extract_category_candidates(record, payload=payload)
+            for idx, item in enumerate(candidates):
+                category_rows.append(
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "parser_name": record.parser_name,
+                        "source_id": source_id,
+                        "uid": _safe_str(item.get("uid")),
+                        "title": _safe_str(item.get("title")),
+                        "parent_uid": _safe_str(item.get("parent_uid")),
+                        "depth": self._to_int(item.get("depth")),
+                        "sort_order": self._to_int(item.get("sort_order")) or int(idx),
+                        "alias": _safe_str(item.get("alias")),
+                        "created_at": now,
+                    }
+                )
+
+        if product_rows:
+            session.execute(insert(_CatalogIngestStageProduct), product_rows)
+        if asset_rows:
+            session.execute(insert(_CatalogIngestStageAsset), asset_rows)
+        if category_rows:
+            session.execute(insert(_CatalogIngestStageCategory), category_rows)
+        LOGGER.debug(
+            "Catalog chunk staged: chunk_id=%s products=%s assets=%s categories=%s",
+            chunk.chunk_id,
+            len(product_rows),
+            len(asset_rows),
+            len(category_rows),
+        )
+
+    def _clear_stage_chunk_in_session(self, session: Session, chunk_id: str) -> None:
+        session.execute(
+            delete(_CatalogIngestStageAsset).where(_CatalogIngestStageAsset.chunk_id == chunk_id)
+        )
+        session.execute(
+            delete(_CatalogIngestStageCategory).where(_CatalogIngestStageCategory.chunk_id == chunk_id)
+        )
+        session.execute(
+            delete(_CatalogIngestStageProduct).where(_CatalogIngestStageProduct.chunk_id == chunk_id)
+        )
 
     @staticmethod
     def _create_engine(database_url: str) -> Engine:
@@ -686,26 +1037,242 @@ class CatalogRepository:
 
         now = _utc_now()
         for identity_type, identity_value in identity_values:
+            row = self._ensure_identity_map_row(
+                session,
+                parser_name=parser_name,
+                identity_type=identity_type,
+                identity_value=identity_value,
+                canonical_product_id=chosen_id,
+                updated_at=now,
+            )
+            current_canonical = _safe_str(row.canonical_product_id)
+            if current_canonical is not None:
+                chosen_id = current_canonical
+
+        for identity_type, identity_value in identity_values:
             row = self._get_identity_map_row(
                 session,
                 parser_name=parser_name,
                 identity_type=identity_type,
                 identity_value=identity_value,
             )
-            if row is None:
-                row = _CatalogIdentityMap(
-                    parser_name=parser_name,
-                    identity_type=identity_type,
-                    identity_value=identity_value,
-                    canonical_product_id=chosen_id,
-                    updated_at=now,
-                )
-                session.add(row)
-            else:
+            if row is not None:
                 row.canonical_product_id = chosen_id
                 row.updated_at = now
 
         return chosen_id
+
+    def _snapshot_content_fingerprint(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+    ) -> str:
+        source_id = self._source_id(record)
+        fingerprint_input = {
+            "parser_name": record.parser_name.strip().lower(),
+            "source_id": source_id,
+            "title_original": record.title_original,
+            "title_normalized_no_stopwords": record.title_normalized_no_stopwords,
+            "brand": record.brand,
+            "source_page_url": record.source_page_url,
+            "description": record.description,
+            "producer_name": record.producer_name,
+            "producer_country": record.producer_country,
+            "expiration_date_in_days": record.expiration_date_in_days,
+            "rating": record.rating,
+            "reviews_count": record.reviews_count,
+            "price": record.price,
+            "discount_price": record.discount_price,
+            "loyal_price": record.loyal_price,
+            "price_unit": record.price_unit,
+            "adult": record.adult,
+            "is_new": record.is_new,
+            "promo": record.promo,
+            "season": record.season,
+            "hit": record.hit,
+            "data_matrix": record.data_matrix,
+            "unit": record.unit,
+            "available_count": record.available_count,
+            "package_quantity": record.package_quantity,
+            "package_unit": record.package_unit,
+            "category_normalized": record.category_normalized,
+            "geo_normalized": record.geo_normalized,
+            "composition_original": record.composition_original,
+            "composition_normalized": record.composition_normalized,
+            "image_urls": list(record.image_urls),
+            "image_fingerprints": list(record.image_fingerprints),
+            "categories": self._extract_category_candidates(record, payload=payload),
+            "geo_components": self._extract_geo_components(record, payload=payload),
+        }
+        encoded = json.dumps(
+            self._to_json_safe(fingerprint_input),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def _source_event_uid(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+    ) -> str:
+        receiver_product_id = self._to_int(payload.get("receiver_product_id")) or 0
+        receiver_artifact_id = self._to_int(payload.get("receiver_artifact_id")) or 0
+        seed = "|".join(
+            (
+                record.parser_name.strip().lower(),
+                self._source_id(record),
+                self._to_utc(record.observed_at).isoformat(),
+                str(receiver_product_id),
+                str(receiver_artifact_id),
+            )
+        )
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+    def _update_source_fingerprint_in_session(
+        self,
+        session: Session,
+        *,
+        record: NormalizedProductRecord,
+        snapshot_fingerprint: str,
+    ) -> None:
+        parser_name = record.parser_name.strip().lower()
+        source_id = self._source_id(record)
+        row = session.get(_CatalogProductSource, (parser_name, source_id))
+        if row is None:
+            return
+        if _is_missing(row.latest_content_fingerprint):
+            row.latest_content_fingerprint = snapshot_fingerprint
+
+    def _touch_latest_snapshot_if_unchanged(
+        self,
+        session: Session,
+        record: NormalizedProductRecord,
+        *,
+        snapshot_fingerprint: str,
+    ) -> bool:
+        parser_name = record.parser_name.strip().lower()
+        source_id = self._source_id(record)
+        source = session.get(_CatalogProductSource, (parser_name, source_id))
+        if source is None or source.latest_snapshot_id is None:
+            return False
+
+        latest_source_fingerprint = _safe_str(source.latest_content_fingerprint)
+        if latest_source_fingerprint is not None and latest_source_fingerprint != snapshot_fingerprint:
+            return False
+
+        snapshot = session.get(_CatalogProductSnapshot, int(source.latest_snapshot_id))
+        if snapshot is None:
+            return False
+
+        existing_fingerprint = _safe_str(snapshot.content_fingerprint)
+        if existing_fingerprint is None or existing_fingerprint != snapshot_fingerprint:
+            return False
+
+        observed_at = self._to_utc(record.observed_at)
+        now = _utc_now()
+
+        if snapshot.valid_from_at is None:
+            snapshot.valid_from_at = snapshot.observed_at
+        if snapshot.valid_to_at is None:
+            snapshot.valid_to_at = snapshot.observed_at
+        snapshot.valid_to_at = self._max_datetime(snapshot.valid_to_at, observed_at)
+        snapshot.observed_at = self._max_datetime(snapshot.observed_at, observed_at)
+
+        if _safe_str(source.canonical_product_id):
+            record.canonical_product_id = source.canonical_product_id
+        else:
+            source.canonical_product_id = record.canonical_product_id or source.canonical_product_id
+        source.last_seen_at = self._max_datetime(source.last_seen_at, observed_at)
+        source.latest_content_fingerprint = snapshot_fingerprint
+        source.updated_at = now
+
+        projection = session.scalar(
+            select(_CatalogProduct).where(
+                _CatalogProduct.parser_name == record.parser_name,
+                _CatalogProduct.source_id == source_id,
+            )
+        )
+        if projection is not None:
+            projection.observed_at = self._max_datetime(projection.observed_at, observed_at)
+            projection.updated_at = now
+
+        LOGGER.debug(
+            "Catalog snapshot reused: parser=%s source_id=%s snapshot_id=%s valid_from_at=%s valid_to_at=%s",
+            record.parser_name,
+            source_id,
+            snapshot.id,
+            snapshot.valid_from_at,
+            snapshot.valid_to_at,
+        )
+        return True
+
+    def _ensure_identity_map_row(
+        self,
+        session: Session,
+        *,
+        parser_name: str,
+        identity_type: str,
+        identity_value: str,
+        canonical_product_id: str,
+        updated_at: datetime,
+    ) -> _CatalogIdentityMap:
+        row = self._get_identity_map_row(
+            session,
+            parser_name=parser_name,
+            identity_type=identity_type,
+            identity_value=identity_value,
+        )
+        if row is not None:
+            if _is_missing(row.canonical_product_id):
+                row.canonical_product_id = canonical_product_id
+            row.updated_at = updated_at
+            return row
+
+        pk = {
+            "parser_name": parser_name,
+            "identity_type": identity_type,
+            "identity_value": identity_value,
+        }
+        values = {
+            **pk,
+            "canonical_product_id": canonical_product_id,
+            "updated_at": updated_at,
+        }
+
+        dialect_name = session.get_bind().dialect.name
+        if dialect_name == "mysql":
+            from sqlalchemy.dialects.mysql import insert as mysql_insert
+
+            stmt = mysql_insert(_CatalogIdentityMap).values(**values).on_duplicate_key_update(
+                updated_at=updated_at
+            )
+            session.execute(stmt)
+        elif dialect_name == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+            stmt = sqlite_insert(_CatalogIdentityMap).values(**values).on_conflict_do_nothing(
+                index_elements=("parser_name", "identity_type", "identity_value"),
+            )
+            session.execute(stmt)
+        else:
+            row = _CatalogIdentityMap(**values)
+            session.add(row)
+            return row
+
+        row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+        if row is None:
+            row = _CatalogIdentityMap(**values)
+            session.add(row)
+            return row
+
+        if _is_missing(row.canonical_product_id):
+            row.canonical_product_id = canonical_product_id
+        row.updated_at = updated_at
+        return row
 
     @staticmethod
     def _get_identity_map_row(
@@ -785,7 +1352,7 @@ class CatalogRepository:
             len(unique_urls),
             len(duplicates_to_delete),
         )
-        self._delete_duplicate_images(duplicates_to_delete)
+        self._enqueue_duplicate_images(session, duplicates_to_delete)
 
     @staticmethod
     def _get_image_fingerprint_row(
@@ -799,22 +1366,80 @@ class CatalogRepository:
                 return pending
         return session.get(_CatalogImageFingerprint, fingerprint)
 
-    def _delete_duplicate_images(self, duplicate_urls: list[str]) -> None:
+    def _enqueue_duplicate_images(self, session: Session, duplicate_urls: list[str]) -> None:
         if not duplicate_urls:
             return
-        if self._storage_repository is None:
-            LOGGER.debug(
-                "Catalog duplicate image cleanup skipped: storage adapter disabled duplicates=%s",
-                len(duplicate_urls),
+        now = _utc_now()
+        unique_urls = list(dict.fromkeys(duplicate_urls))
+        for image_url in unique_urls:
+            token = _safe_str(image_url)
+            if token is None:
+                continue
+            dedupe_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            row = session.scalar(
+                select(_CatalogStorageDeleteOutbox).where(_CatalogStorageDeleteOutbox.dedupe_key == dedupe_key)
             )
-            return
+            if row is None:
+                row = _CatalogStorageDeleteOutbox(
+                    dedupe_key=dedupe_key,
+                    image_url=token,
+                    status="pending",
+                    attempts=0,
+                    enqueued_at=now,
+                    available_at=now,
+                    processed_at=None,
+                    last_error=None,
+                )
+                session.add(row)
+            else:
+                if row.status != "done":
+                    row.status = "pending"
+                    row.available_at = now
+                    row.last_error = None
+        LOGGER.debug("Catalog duplicate images enqueued to outbox: count=%s", len(unique_urls))
 
-        LOGGER.debug("Catalog deleting duplicate images: count=%s", len(duplicate_urls))
-        try:
-            self._storage_repository.delete_images(duplicate_urls)
-        except Exception:
-            LOGGER.exception("Catalog duplicate image delete failed: count=%s", len(duplicate_urls))
-            raise
+    def process_storage_delete_outbox(self, *, limit: int = 100) -> dict[str, int]:
+        if self._storage_repository is None:
+            return {"processed": 0, "deleted": 0, "failed": 0}
+
+        processed = 0
+        deleted = 0
+        failed = 0
+        now = _utc_now()
+        with self._session_factory() as session:
+            rows = session.scalars(
+                select(_CatalogStorageDeleteOutbox)
+                .where(
+                    _CatalogStorageDeleteOutbox.status == "pending",
+                    _CatalogStorageDeleteOutbox.available_at <= now,
+                )
+                .order_by(_CatalogStorageDeleteOutbox.id.asc())
+                .limit(max(1, int(limit)))
+            ).all()
+
+            for row in rows:
+                processed += 1
+                try:
+                    self._storage_repository.delete_images([row.image_url])
+                    row.status = "done"
+                    row.processed_at = _utc_now()
+                    row.last_error = None
+                    deleted += 1
+                except Exception as exc:
+                    row.attempts = int(row.attempts) + 1
+                    row.last_error = str(exc)
+                    if row.attempts >= 10:
+                        row.status = "failed"
+                        failed += 1
+                    else:
+                        delay_sec = min(300, 2 ** max(0, row.attempts - 1))
+                        row.available_at = _utc_now().replace(
+                            microsecond=0
+                        ) + timedelta(seconds=delay_sec)
+                        row.status = "pending"
+                        failed += 1
+            session.commit()
+        return {"processed": processed, "deleted": deleted, "failed": failed}
 
     def _apply_backfill(self, session: Session, record: NormalizedProductRecord) -> None:
         canonical_product_id = _safe_str(record.canonical_product_id)
@@ -880,8 +1505,23 @@ class CatalogRepository:
         *,
         settlement: _CatalogSettlement | None,
         payload: dict[str, Any],
-    ) -> _CatalogProductSnapshot:
+        snapshot_fingerprint: str,
+        source_event_uid: str | None,
+    ) -> tuple[_CatalogProductSnapshot, bool]:
         now = _utc_now()
+        observed_at = self._to_utc(record.observed_at)
+        event_uid = _safe_str(source_event_uid)
+
+        if event_uid is not None:
+            existing = session.scalar(
+                select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.source_event_uid == event_uid)
+            )
+            if existing is not None:
+                if existing.valid_to_at is None:
+                    existing.valid_to_at = existing.observed_at
+                existing.valid_to_at = self._max_datetime(existing.valid_to_at, observed_at)
+                existing.observed_at = self._max_datetime(existing.observed_at, observed_at)
+                return existing, False
 
         snapshot = _CatalogProductSnapshot(
             canonical_product_id=record.canonical_product_id or str(uuid4()),
@@ -920,14 +1560,18 @@ class CatalogRepository:
             composition_original=record.composition_original,
             composition_normalized=record.composition_normalized,
             settlement_id=settlement.id if settlement is not None else None,
-            observed_at=self._to_utc(record.observed_at),
+            source_event_uid=event_uid,
+            content_fingerprint=snapshot_fingerprint,
+            valid_from_at=observed_at,
+            valid_to_at=observed_at,
+            observed_at=observed_at,
             created_at=now,
         )
         session.add(snapshot)
         session.flush([snapshot])
         if snapshot.id is not None:
             self._insert_snapshot_assets(session, int(snapshot.id), record, now=now)
-        return snapshot
+        return snapshot, True
 
     def _upsert_product_source(
         self,
@@ -935,6 +1579,7 @@ class CatalogRepository:
         record: NormalizedProductRecord,
         *,
         snapshot: _CatalogProductSnapshot,
+        snapshot_fingerprint: str | None = None,
     ) -> None:
         parser_name = record.parser_name.strip().lower()
         source_id = self._source_id(record)
@@ -948,6 +1593,7 @@ class CatalogRepository:
                 source_id=source_id,
                 canonical_product_id=record.canonical_product_id or str(uuid4()),
                 latest_snapshot_id=snapshot.id,
+                latest_content_fingerprint=snapshot_fingerprint,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
                 updated_at=now,
@@ -961,6 +1607,8 @@ class CatalogRepository:
             row.canonical_product_id = record.canonical_product_id or row.canonical_product_id
 
         row.latest_snapshot_id = snapshot.id
+        if snapshot_fingerprint is not None:
+            row.latest_content_fingerprint = snapshot_fingerprint
         row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
         row.updated_at = now
 
@@ -1708,6 +2356,180 @@ class CatalogRepository:
                     f"Schema mismatch: missing table `{table_name}`. Use the current converter schema."
                 )
         LOGGER.debug("Catalog schema validation passed")
+
+    def _ensure_snapshot_interval_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_product_snapshots"):
+            return
+
+        snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        missing_columns = [
+            column_name
+            for column_name in ("content_fingerprint", "valid_from_at", "valid_to_at")
+            if column_name not in snapshot_columns
+        ]
+        if not missing_columns:
+            return
+
+        dialect = self._engine.dialect.name
+        with self._engine.begin() as connection:
+            for column_name in missing_columns:
+                if dialect == "mysql":
+                    if column_name == "content_fingerprint":
+                        ddl = (
+                            "ALTER TABLE catalog_product_snapshots "
+                            "ADD COLUMN content_fingerprint VARCHAR(64) NULL"
+                        )
+                    else:
+                        ddl = (
+                            f"ALTER TABLE catalog_product_snapshots "
+                            f"ADD COLUMN {column_name} DATETIME(6) NULL"
+                        )
+                elif dialect == "sqlite":
+                    if column_name == "content_fingerprint":
+                        ddl = (
+                            "ALTER TABLE catalog_product_snapshots "
+                            "ADD COLUMN content_fingerprint VARCHAR(64)"
+                        )
+                    else:
+                        ddl = (
+                            f"ALTER TABLE catalog_product_snapshots "
+                            f"ADD COLUMN {column_name} DATETIME"
+                        )
+                else:
+                    raise RuntimeError(
+                        f"Unsupported dialect for snapshot schema migration: {dialect}"
+                    )
+                connection.execute(text(ddl))
+
+        LOGGER.info(
+            "Catalog snapshot schema migrated: added_columns=%s",
+            ",".join(missing_columns),
+        )
+
+    def _ensure_product_sources_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_product_sources"):
+            return
+
+        columns = {item["name"] for item in inspector.get_columns("catalog_product_sources")}
+        if "latest_content_fingerprint" not in columns:
+            dialect = self._engine.dialect.name
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    ddl = (
+                        "ALTER TABLE catalog_product_sources "
+                        "ADD COLUMN latest_content_fingerprint VARCHAR(64) NULL"
+                    )
+                else:
+                    ddl = (
+                        "ALTER TABLE catalog_product_sources "
+                        "ADD COLUMN latest_content_fingerprint VARCHAR(64)"
+                    )
+                connection.execute(text(ddl))
+            LOGGER.info("Catalog product_sources schema migrated: added latest_content_fingerprint")
+
+        indexes = {idx.get("name") for idx in inspector.get_indexes("catalog_product_sources")}
+        if "idx_cps_last_seen" not in indexes:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE INDEX idx_cps_last_seen ON catalog_product_sources (last_seen_at)"
+                    )
+                )
+            LOGGER.info("Catalog product_sources schema migrated: added idx_cps_last_seen")
+
+    def _ensure_snapshot_event_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_product_snapshots"):
+            return
+
+        columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        if "source_event_uid" not in columns:
+            dialect = self._engine.dialect.name
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    ddl = (
+                        "ALTER TABLE catalog_product_snapshots "
+                        "ADD COLUMN source_event_uid VARCHAR(191) NULL"
+                    )
+                else:
+                    ddl = (
+                        "ALTER TABLE catalog_product_snapshots "
+                        "ADD COLUMN source_event_uid VARCHAR(191)"
+                    )
+                connection.execute(text(ddl))
+            LOGGER.info("Catalog snapshots schema migrated: added source_event_uid")
+
+        indexes = {idx.get("name") for idx in inspector.get_indexes("catalog_product_snapshots")}
+        if "idx_cps_latest" not in indexes:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE INDEX idx_cps_latest ON catalog_product_snapshots (parser_name, source_id, id)"
+                    )
+                )
+            LOGGER.info("Catalog snapshots schema migrated: added idx_cps_latest")
+
+        unique_constraints = {
+            item.get("name")
+            for item in inspector.get_unique_constraints("catalog_product_snapshots")
+        }
+        if "uq_cps_event" not in unique_constraints:
+            dialect = self._engine.dialect.name
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_product_snapshots "
+                            "ADD CONSTRAINT uq_cps_event UNIQUE (source_event_uid)"
+                        )
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "CREATE UNIQUE INDEX uq_cps_event "
+                            "ON catalog_product_snapshots (source_event_uid)"
+                        )
+                    )
+            LOGGER.info("Catalog snapshots schema migrated: added uq_cps_event")
+
+    def _ensure_catalog_products_constraints(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_products"):
+            return
+
+        unique_constraints = {
+            item.get("name")
+            for item in inspector.get_unique_constraints("catalog_products")
+        }
+        indexes = {idx.get("name") for idx in inspector.get_indexes("catalog_products")}
+        if "uq_catalog_products_source" in unique_constraints or "uq_catalog_products_source" in indexes:
+            return
+
+        dialect = self._engine.dialect.name
+        try:
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_products "
+                            "ADD CONSTRAINT uq_catalog_products_source UNIQUE (parser_name, source_id)"
+                        )
+                    )
+                else:
+                    connection.execute(
+                        text(
+                            "CREATE UNIQUE INDEX uq_catalog_products_source "
+                            "ON catalog_products (parser_name, source_id)"
+                        )
+                    )
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to add unique constraint uq_catalog_products_source on catalog_products(parser_name, source_id). "
+                "Check and deduplicate existing rows before running converter v2."
+            ) from exc
+        LOGGER.info("Catalog products schema migrated: added uq_catalog_products_source")
 
     @staticmethod
     def _build_storage_repository_from_env() -> StorageRepository | None:

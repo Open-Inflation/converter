@@ -25,10 +25,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Filter by parser_name from receiver run_artifacts",
     )
     parser.add_argument(
-        "--batch-size",
+        "--receiver-fetch-size",
         type=int,
-        default=250,
-        help="Max records per batch",
+        default=2000,
+        help="Max records per receiver fetch",
+    )
+    parser.add_argument(
+        "--write-chunk-size",
+        type=int,
+        default=1000,
+        help="Max normalized records per atomic write chunk",
     )
     parser.add_argument(
         "--max-batches",
@@ -37,10 +43,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop after N batches (0 means no limit)",
     )
     parser.add_argument(
-        "--txn-chunk-size",
-        type=int,
-        default=25,
-        help="Transactional subchunk size inside one fetched batch",
+        "--sync-version",
+        choices=("v2",),
+        default="v2",
+        help="Sync engine version",
     )
     return parser
 
@@ -53,8 +59,9 @@ def main() -> None:
         f"receiver={args.receiver_db}",
         f"catalog={args.catalog_db}",
         f"parser={args.parser_name}",
-        f"batch_size={args.batch_size}",
-        f"txn_chunk_size={args.txn_chunk_size}",
+        f"sync_version={args.sync_version}",
+        f"receiver_fetch_size={args.receiver_fetch_size}",
+        f"write_chunk_size={args.write_chunk_size}",
     )
 
     service = ConverterSyncService()
@@ -70,9 +77,10 @@ def main() -> None:
             receiver_db=args.receiver_db,
             catalog_db=args.catalog_db,
             parser_name=args.parser_name,
-            batch_size=args.batch_size,
+            receiver_fetch_size=args.receiver_fetch_size,
+            write_chunk_size=args.write_chunk_size,
+            sync_version=args.sync_version,
             max_batches=args.max_batches,
-            txn_chunk_size=args.txn_chunk_size,
         ),
         on_batch=_on_batch,
     )

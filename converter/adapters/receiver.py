@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import JSON, String, Text, and_, func, inspect, or_, select
+from sqlalchemy import JSON, String, Text, and_, func, inspect, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from converter.core.models import PackageUnit, RawProductRecord, Unit
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class _ReceiverBase(DeclarativeBase):
@@ -476,6 +480,7 @@ class ReceiverRepository:
             expire_on_commit=False,
         )
         self._validate_schema()
+        self._ensure_read_indexes()
 
     def fetch_batch(
         self,
@@ -677,11 +682,51 @@ class ReceiverRepository:
                     row_data,
                     default_parser_name=self._default_parser_name,
                 )
-                if parser_filter and parsed.parser_name.strip().lower() != parser_filter:
-                    continue
                 out.append(parsed)
 
             return out
+
+    def _ensure_read_indexes(self) -> None:
+        dialect = self._engine.dialect.name
+        if dialect not in {"mysql", "sqlite"}:
+            return
+
+        required_indexes = {
+            "run_artifacts": (
+                ("idx_ra_parser_ingested_id", "parser_name, ingested_at, id"),
+            ),
+            "run_artifact_products": (
+                ("idx_rap_artifact_product", "artifact_id, id"),
+            ),
+            "run_artifact_administrative_units": (
+                ("idx_raau_artifact", "artifact_id"),
+            ),
+            "run_artifact_product_images": (
+                ("idx_rapi_product_sort", "product_id, sort_order"),
+            ),
+            "run_artifact_product_meta": (
+                ("idx_rapm_product_sort", "product_id, sort_order"),
+            ),
+            "run_artifact_product_wholesale_prices": (
+                ("idx_rapwp_product_sort", "product_id, sort_order"),
+            ),
+            "run_artifact_product_categories": (
+                ("idx_rapc_product_sort", "product_id, sort_order"),
+            ),
+        }
+
+        inspector = inspect(self._engine)
+        with self._engine.begin() as connection:
+            for table_name, index_defs in required_indexes.items():
+                if not inspector.has_table(table_name):
+                    continue
+                existing = {item.get("name") for item in inspector.get_indexes(table_name)}
+                for index_name, columns in index_defs:
+                    if index_name in existing:
+                        continue
+                    ddl = f"CREATE INDEX {index_name} ON {table_name} ({columns})"
+                    connection.execute(text(ddl))
+                    LOGGER.info("Receiver schema optimized: created index %s on %s", index_name, table_name)
 
     def _validate_schema(self) -> None:
         inspector = inspect(self._engine)
