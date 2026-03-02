@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
 
-from converter.adapters.catalog import _flatten_payload_nodes
+from converter.adapters.catalog import _compact_payload_for_storage, _flatten_payload_nodes
 from converter import CatalogSQLiteRepository, build_default_pipeline
 from converter.core.models import NormalizedProductRecord, RawProductRecord
 from converter.core.ports import StorageRepository
@@ -152,7 +152,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("catalog_product_assets", tables)
                 self.assertIn("catalog_snapshot_assets", tables)
                 self.assertIn("catalog_product_payload_nodes", tables)
-                self.assertIn("catalog_snapshot_payload_nodes", tables)
             finally:
                 conn.close()
         finally:
@@ -174,6 +173,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 },
                 "receiver_product_meta": [{"name": "Жирность", "value_text": "2.5%"}],
             }
+            compact_payload = _compact_payload_for_storage(payload)
 
             record = NormalizedProductRecord(
                 parser_name="fixprice",
@@ -222,7 +222,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     id_column="product_id",
                     row_id=int(product["id"]),
                 )
-                self.assertEqual(sorted(product_nodes), sorted(_flatten_payload_nodes(payload)))
+                self.assertEqual(sorted(product_nodes), sorted(_flatten_payload_nodes(compact_payload)))
                 self.assertEqual(
                     self._asset_values(
                         conn,
@@ -249,13 +249,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
                 self.assertEqual(snapshot["price_unit"], "RUB")
                 self.assertEqual(snapshot["description"], "Тестовое описание")
-                snapshot_nodes = self._payload_nodes(
-                    conn,
-                    table="catalog_snapshot_payload_nodes",
-                    id_column="snapshot_id",
-                    row_id=int(snapshot["id"]),
-                )
-                self.assertEqual(sorted(snapshot_nodes), sorted(_flatten_payload_nodes(payload)))
+                snapshot_payload_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_payload_nodes'"
+                ).fetchone()
+                self.assertIsNone(snapshot_payload_table)
             finally:
                 conn.close()
         finally:

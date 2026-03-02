@@ -53,17 +53,18 @@ converter/
 - `catalog_product_category_links` - связи snapshot -> category.
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
 - `catalog_product_assets` / `catalog_snapshot_assets` - массивные поля товара (image urls, duplicates, fingerprints) в нормализованном виде.
-- `catalog_product_payload_nodes` / `catalog_snapshot_payload_nodes` - полный payload источника как дерево узлов (без JSON-колонок).
+- `catalog_product_payload_nodes` - компактный payload-контракт как дерево узлов (без JSON-колонок, только current state).
 
 Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
 `catalog_product_snapshots` не сохраняются.
 
-Converter сохраняет расширенный product-контракт без потерь: в snapshots/current projection
+Converter сохраняет расширенный product-контракт: в snapshots/current projection
 пишутся цены (`price/discount_price/loyal_price/price_unit`), product-флаги и producer/rating,
 оригинальный и нормализованный состав (`composition_original` / `composition_normalized`),
-а полный источник из receiver (product/artifact/admin/categories/images/meta/wholesale/category-links)
-сохраняется в реляционных таблицах `catalog_*_payload_nodes` (без JSON-колонок).
+а в `catalog_product_payload_nodes` сохраняется компактный subset источника:
+run/product/artifact identifiers, geo-ключи и координаты, `receiver_categories`,
+`receiver_admin_unit` (compact), `receiver_artifact` (compact).
 
 Политика обновления:
 

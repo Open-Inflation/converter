@@ -109,6 +109,66 @@ def _flatten_payload_nodes(value: object) -> list[tuple[str, str, str | None]]:
     return out
 
 
+def _compact_payload_for_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+
+    scalar_keys = (
+        "receiver_run_id",
+        "receiver_product_id",
+        "receiver_artifact_id",
+        "receiver_sort_order",
+        "receiver_geo_country",
+        "receiver_geo_region",
+        "receiver_geo_name",
+        "receiver_geo_settlement_type",
+        "receiver_geo_alias",
+        "receiver_geo_latitude",
+        "receiver_geo_longitude",
+    )
+    for key in scalar_keys:
+        if key in payload:
+            out[key] = payload[key]
+
+    admin_unit = payload.get("receiver_admin_unit")
+    if isinstance(admin_unit, dict):
+        compact_admin: dict[str, Any] = {}
+        for key in ("country", "region", "name", "alias", "settlement_type", "latitude", "longitude"):
+            if key in admin_unit:
+                compact_admin[key] = admin_unit[key]
+        if compact_admin:
+            out["receiver_admin_unit"] = compact_admin
+
+    artifact = payload.get("receiver_artifact")
+    if isinstance(artifact, dict):
+        compact_artifact: dict[str, Any] = {}
+        for key in ("id", "ingested_at", "latitude", "longitude"):
+            if key in artifact:
+                compact_artifact[key] = artifact[key]
+        if compact_artifact:
+            out["receiver_artifact"] = compact_artifact
+
+    categories = payload.get("receiver_categories")
+    if isinstance(categories, list):
+        compact_categories: list[dict[str, Any] | str] = []
+        for item in categories:
+            if isinstance(item, dict):
+                compact_category: dict[str, Any] = {}
+                for key in ("uid", "parent_uid", "title", "alias", "depth", "sort_order"):
+                    if key in item:
+                        compact_category[key] = item[key]
+                if compact_category:
+                    compact_categories.append(compact_category)
+                continue
+
+            token = _safe_str(item)
+            if token is not None:
+                compact_categories.append(token)
+        if compact_categories:
+            out["receiver_categories"] = compact_categories
+
+    return out
+
+
 class _CatalogBase(DeclarativeBase):
     pass
 
@@ -393,26 +453,6 @@ class _CatalogProductPayloadNode(_CatalogBase):
     )
 
 
-class _CatalogSnapshotPayloadNode(_CatalogBase):
-    __tablename__ = "catalog_snapshot_payload_nodes"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    path: Mapped[str] = mapped_column(String(1024), nullable=False)
-    path_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    node_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "snapshot_id",
-            "path_hash",
-            name="uq_catalog_snapshot_payload_nodes_path_hash",
-        ),
-    )
-
-
 class _ConverterSyncState(_CatalogBase):
     __tablename__ = "converter_sync_state"
 
@@ -619,7 +659,8 @@ class CatalogRepository:
             self._apply_backfill(session, record)
 
             payload = self._source_payload(record)
-            payload_nodes = _flatten_payload_nodes(payload)
+            payload_for_storage = _compact_payload_for_storage(payload)
+            payload_nodes = _flatten_payload_nodes(payload_for_storage)
 
             settlement = self._upsert_settlement(session, record, payload=payload)
             snapshot = self._insert_product_snapshot(
@@ -627,7 +668,6 @@ class CatalogRepository:
                 record,
                 settlement=settlement,
                 payload=payload,
-                payload_nodes=payload_nodes,
             )
             self._append_settlement_geodata(
                 session,
@@ -865,7 +905,6 @@ class CatalogRepository:
         *,
         settlement: _CatalogSettlement | None,
         payload: dict[str, Any],
-        payload_nodes: list[tuple[str, str, str | None]],
     ) -> _CatalogProductSnapshot:
         now = _utc_now()
 
@@ -913,12 +952,6 @@ class CatalogRepository:
         session.flush([snapshot])
         if snapshot.id is not None:
             self._insert_snapshot_assets(session, int(snapshot.id), record, now=now)
-            self._insert_snapshot_payload_nodes(
-                session,
-                int(snapshot.id),
-                payload_nodes=payload_nodes,
-                now=now,
-            )
         return snapshot
 
     def _upsert_product_source(
@@ -1214,12 +1247,6 @@ class CatalogRepository:
             longitude = _as_float(artifact.get("longitude"))
             if latitude is not None and longitude is not None:
                 return latitude, longitude
-
-        # Compatibility with flat payload variants.
-        latitude = _as_float(payload.get("artifact_latitude"))
-        longitude = _as_float(payload.get("artifact_longitude"))
-        if latitude is not None and longitude is not None:
-            return latitude, longitude
 
         return None, None
 
@@ -1533,30 +1560,6 @@ class CatalogRepository:
         if rows:
             session.execute(insert(_CatalogProductPayloadNode), rows)
 
-    def _insert_snapshot_payload_nodes(
-        self,
-        session: Session,
-        snapshot_id: int,
-        *,
-        payload_nodes: list[tuple[str, str, str | None]],
-        now: datetime,
-    ) -> None:
-        rows: list[dict[str, Any]] = []
-        for path, node_type, value_text in payload_nodes:
-            path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
-            rows.append(
-                {
-                    "snapshot_id": int(snapshot_id),
-                    "path": path,
-                    "path_hash": path_hash,
-                    "node_type": node_type,
-                    "value_text": value_text,
-                    "created_at": now,
-                }
-            )
-        if rows:
-            session.execute(insert(_CatalogSnapshotPayloadNode), rows)
-
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
         for category, _ in categories:
@@ -1721,7 +1724,6 @@ class CatalogRepository:
             "catalog_product_assets",
             "catalog_snapshot_assets",
             "catalog_product_payload_nodes",
-            "catalog_snapshot_payload_nodes",
         )
         for table_name in expected_tables:
             if not inspector.has_table(table_name):
@@ -1730,7 +1732,6 @@ class CatalogRepository:
                 )
         payload_required_columns = {
             "catalog_product_payload_nodes": ("product_id", "path", "path_hash", "node_type"),
-            "catalog_snapshot_payload_nodes": ("snapshot_id", "path", "path_hash", "node_type"),
         }
         for table_name, required_columns in payload_required_columns.items():
             table_columns = {item["name"] for item in inspector.get_columns(table_name)}
