@@ -33,8 +33,20 @@ class StorageHTTPRepository:
         if not self._api_token:
             raise ValueError("storage api_token must be non-empty")
 
+        LOGGER.info(
+            "Storage HTTP adapter configured: origin=%s timeout_seconds=%.1f fail_on_error=%s",
+            self._origin,
+            self._timeout_seconds,
+            self._fail_on_error,
+        )
+
     def delete_images(self, urls: Sequence[str]) -> None:
         image_names = self._extract_unique_image_names(urls)
+        LOGGER.debug(
+            "Storage delete_images requested: urls=%s deletable_unique_images=%s",
+            len(urls),
+            len(image_names),
+        )
         for image_name in image_names:
             self._delete_one(image_name)
 
@@ -94,12 +106,15 @@ class StorageHTTPRepository:
             with urlopen(request, timeout=self._timeout_seconds) as response:
                 status = int(getattr(response, "status", 204))
                 if status == 204:
+                    LOGGER.debug("Storage image deleted: image=%s status=%s", image_name, status)
                     return
                 if status == 404:
+                    LOGGER.debug("Storage image already absent: image=%s status=%s", image_name, status)
                     return
                 raise RuntimeError(f"Storage delete failed for {image_name}: HTTP {status}")
         except HTTPError as exc:
             if int(exc.code) == 404:
+                LOGGER.debug("Storage image already absent: image=%s status=%s", image_name, int(exc.code))
                 return
             message = f"Storage delete failed for {image_name}: HTTP {exc.code}"
             if self._fail_on_error:

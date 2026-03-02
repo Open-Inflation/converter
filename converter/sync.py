@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
+from time import monotonic
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .adapters import (
     CatalogMySQLRepository,
@@ -15,6 +18,9 @@ from .adapters import (
 from .core.models import RawProductRecord
 from .core.registry import HandlerRegistry
 from .parsers import register_builtin_handlers
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +104,21 @@ def build_catalog_repository(dsn_or_path: str) -> Any:
     return CatalogSQLiteRepository(Path(token).resolve())
 
 
+def _safe_db_ref(dsn_or_path: str) -> str:
+    token = (dsn_or_path or "").strip()
+    if not token:
+        return "<empty>"
+    if is_mysql_dsn(token):
+        parsed = urlparse(token)
+        host = parsed.hostname or "<host>"
+        port = parsed.port
+        db = parsed.path.lstrip("/") if parsed.path else ""
+        port_part = f":{port}" if port else ""
+        db_part = f"/{db}" if db else ""
+        return f"mysql://{host}{port_part}{db_part}"
+    return str(Path(token).resolve())
+
+
 class ConverterSyncService:
     def __init__(self, registry: HandlerRegistry | None = None) -> None:
         if registry is None:
@@ -111,22 +132,53 @@ class ConverterSyncService:
         *,
         on_batch: Callable[[SyncBatchEvent], None] | None = None,
     ) -> SyncOutcome:
-        receiver_repo = build_receiver_repository(job.receiver_db)
-        catalog_repo = build_catalog_repository(job.catalog_db)
-
+        started_at = monotonic()
         parser_name = job.parser_name.strip() or "fixprice"
         batch_size = max(1, int(job.batch_size))
         max_batches = max(0, int(job.max_batches))
         txn_chunk_size = max(1, int(job.txn_chunk_size))
 
+        LOGGER.info(
+            "Sync started: parser=%s receiver=%s catalog=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            parser_name,
+            _safe_db_ref(job.receiver_db),
+            _safe_db_ref(job.catalog_db),
+            batch_size,
+            max_batches,
+            txn_chunk_size,
+        )
+
+        receiver_repo = build_receiver_repository(job.receiver_db)
+        catalog_repo = build_catalog_repository(job.catalog_db)
+
         watermark_ingested_at, watermark_product_id = catalog_repo.get_receiver_cursor(parser_name)
+        LOGGER.info(
+            "Sync cursor loaded: parser=%s ingested_at=%s product_id=%s",
+            parser_name,
+            watermark_ingested_at,
+            watermark_product_id,
+        )
         total_processed = 0
         batches = 0
 
         while True:
             if max_batches > 0 and batches >= max_batches:
+                LOGGER.info(
+                    "Sync reached max_batches limit: parser=%s batches=%s max_batches=%s",
+                    parser_name,
+                    batches,
+                    max_batches,
+                )
                 break
 
+            next_batch_number = batches + 1
+            LOGGER.debug(
+                "Sync fetching batch: parser=%s batch_number=%s cursor_ingested_at=%s cursor_product_id=%s",
+                parser_name,
+                next_batch_number,
+                watermark_ingested_at,
+                watermark_product_id,
+            )
             raw_records = receiver_repo.fetch_batch(
                 limit=batch_size,
                 parser_name=parser_name,
@@ -134,12 +186,40 @@ class ConverterSyncService:
                 after_product_id=watermark_product_id,
             )
             if not raw_records:
+                LOGGER.info(
+                    "Sync finished input stream: parser=%s batches=%s total_processed=%s",
+                    parser_name,
+                    batches,
+                    total_processed,
+                )
                 break
 
+            LOGGER.info(
+                "Sync fetched batch: parser=%s batch_number=%s fetched=%s",
+                parser_name,
+                next_batch_number,
+                len(raw_records),
+            )
             upsert_with_cursor = getattr(catalog_repo, "upsert_many_with_cursor", None)
             for chunk_start in range(0, len(raw_records), txn_chunk_size):
                 raw_chunk = raw_records[chunk_start : chunk_start + txn_chunk_size]
-                normalized = [self._registry.get(item.parser_name).handle(item) for item in raw_chunk]
+                LOGGER.debug(
+                    "Sync processing chunk: parser=%s batch_number=%s chunk_index=%s chunk_size=%s",
+                    parser_name,
+                    next_batch_number,
+                    (chunk_start // txn_chunk_size) + 1,
+                    len(raw_chunk),
+                )
+                try:
+                    normalized = [self._registry.get(item.parser_name).handle(item) for item in raw_chunk]
+                except Exception:
+                    LOGGER.exception(
+                        "Sync normalization failed: parser=%s batch_number=%s chunk_index=%s",
+                        parser_name,
+                        next_batch_number,
+                        (chunk_start // txn_chunk_size) + 1,
+                    )
+                    raise
                 chunk_ingested_at, chunk_product_id = _cursor_from_records(raw_chunk)
 
                 if callable(upsert_with_cursor):
@@ -156,11 +236,28 @@ class ConverterSyncService:
                         ingested_at=chunk_ingested_at,
                         product_id=chunk_product_id,
                     )
+                LOGGER.debug(
+                    "Sync chunk committed: parser=%s batch_number=%s chunk_index=%s cursor_ingested_at=%s cursor_product_id=%s",
+                    parser_name,
+                    next_batch_number,
+                    (chunk_start // txn_chunk_size) + 1,
+                    chunk_ingested_at,
+                    chunk_product_id,
+                )
                 watermark_ingested_at, watermark_product_id = chunk_ingested_at, chunk_product_id
 
             batches += 1
             total_processed += len(raw_records)
 
+            LOGGER.info(
+                "Sync batch complete: parser=%s batch_number=%s batch_size=%s total_processed=%s cursor_ingested_at=%s cursor_product_id=%s",
+                parser_name,
+                batches,
+                len(raw_records),
+                total_processed,
+                watermark_ingested_at,
+                watermark_product_id,
+            )
             if on_batch is not None:
                 on_batch(
                     SyncBatchEvent(
@@ -172,9 +269,19 @@ class ConverterSyncService:
                     )
                 )
 
-        return SyncOutcome(
+        outcome = SyncOutcome(
             batches=batches,
             total_processed=total_processed,
             cursor_ingested_at=watermark_ingested_at,
             cursor_product_id=watermark_product_id,
         )
+        LOGGER.info(
+            "Sync finished: parser=%s batches=%s total_processed=%s elapsed_sec=%.3f final_cursor_ingested_at=%s final_cursor_product_id=%s",
+            parser_name,
+            outcome.batches,
+            outcome.total_processed,
+            monotonic() - started_at,
+            outcome.cursor_ingested_at,
+            outcome.cursor_product_id,
+        )
+        return outcome

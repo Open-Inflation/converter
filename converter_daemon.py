@@ -6,6 +6,9 @@ import logging
 from converter.daemon import ConverterDaemon, ConverterDaemonHTTPServer, ConverterDaemonRequestHandler
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run converter daemon with queue and HTTP trigger API")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host")
@@ -34,7 +37,7 @@ def main() -> None:
     args = _build_parser().parse_args()
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
     )
 
     daemon = ConverterDaemon(max_queue_size=args.max_queue_size)
@@ -53,22 +56,28 @@ def main() -> None:
         auth_token=(args.auth_token or "").strip() or None,
     )
 
-    print(
-        "Converter daemon started:",
-        f"listen={args.host}:{args.port}",
-        f"default_receiver_db={bool((args.receiver_db or '').strip())}",
-        f"default_catalog_db={bool((args.catalog_db or '').strip())}",
-        f"default_parser={args.parser_name}",
-        f"default_txn_chunk_size={int(args.txn_chunk_size)}",
+    LOGGER.info(
+        "Converter daemon started: listen=%s:%s default_receiver_db=%s default_catalog_db=%s default_parser=%s batch_size=%s max_batches=%s txn_chunk_size=%s auth_enabled=%s",
+        args.host,
+        int(args.port),
+        bool((args.receiver_db or "").strip()),
+        bool((args.catalog_db or "").strip()),
+        args.parser_name,
+        int(args.batch_size),
+        int(args.max_batches),
+        int(args.txn_chunk_size),
+        bool((args.auth_token or "").strip()),
     )
 
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
-        pass
+        LOGGER.info("Converter daemon interrupted by keyboard signal")
     finally:
+        LOGGER.info("Converter daemon shutting down")
         server.server_close()
         daemon.stop()
+        LOGGER.info("Converter daemon stopped")
 
 
 if __name__ == "__main__":

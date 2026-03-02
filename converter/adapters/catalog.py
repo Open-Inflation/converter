@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 from time import sleep
+from time import monotonic
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -383,14 +384,27 @@ class CatalogRepository:
         )
         _CatalogBase.metadata.create_all(self._engine)
         self._validate_catalog_products_schema()
+        LOGGER.info(
+            "Catalog repository initialized: dialect=%s storage_delete_enabled=%s",
+            self._engine.dialect.name,
+            self._storage_repository is not None,
+        )
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
+            LOGGER.debug("Catalog upsert_many skipped: empty records")
             return
 
+        started_at = monotonic()
+        LOGGER.debug("Catalog upsert_many started: records=%s", len(records))
         self._run_write_transaction(
             lambda session: self._upsert_many_in_session(session, records),
             operation_name="upsert_many",
+        )
+        LOGGER.debug(
+            "Catalog upsert_many finished: records=%s elapsed_sec=%.3f",
+            len(records),
+            monotonic() - started_at,
         )
 
     def upsert_many_with_cursor(
@@ -401,6 +415,15 @@ class CatalogRepository:
         cursor_ingested_at: str,
         cursor_product_id: int,
     ) -> None:
+        started_at = monotonic()
+        LOGGER.debug(
+            "Catalog upsert_many_with_cursor started: records=%s parser=%s cursor_ingested_at=%s cursor_product_id=%s",
+            len(records),
+            parser_name,
+            cursor_ingested_at,
+            cursor_product_id,
+        )
+
         def _work(session: Session) -> None:
             if records:
                 self._upsert_many_in_session(session, records)
@@ -415,22 +438,39 @@ class CatalogRepository:
             _work,
             operation_name="upsert_many_with_cursor",
         )
+        LOGGER.debug(
+            "Catalog upsert_many_with_cursor finished: records=%s parser=%s elapsed_sec=%.3f",
+            len(records),
+            parser_name,
+            monotonic() - started_at,
+        )
 
     def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
         with self._session_factory() as session:
             key = self._cursor_key(parser_name)
             row = session.get(_ConverterSyncState, key)
             if row is None:
+                LOGGER.debug("Catalog cursor missing: parser=%s", parser_name)
                 return None, None
 
             token = _safe_str(row.value)
             if token is None:
+                LOGGER.debug("Catalog cursor invalid empty value: parser=%s", parser_name)
                 return None, None
 
             if "\t" not in token:
+                LOGGER.debug("Catalog cursor invalid format: parser=%s value=%s", parser_name, token)
                 return None, None
             ingested_at_raw, product_id_raw = token.rsplit("\t", 1)
-            return _safe_str(ingested_at_raw), self._to_int(product_id_raw)
+            ingested_at = _safe_str(ingested_at_raw)
+            product_id = self._to_int(product_id_raw)
+            LOGGER.debug(
+                "Catalog cursor loaded: parser=%s ingested_at=%s product_id=%s",
+                parser_name,
+                ingested_at,
+                product_id,
+            )
+            return ingested_at, product_id
 
     def set_receiver_cursor(
         self,
@@ -439,6 +479,13 @@ class CatalogRepository:
         ingested_at: str,
         product_id: int,
     ) -> None:
+        LOGGER.debug(
+            "Catalog set_receiver_cursor requested: parser=%s ingested_at=%s product_id=%s",
+            parser_name,
+            ingested_at,
+            product_id,
+        )
+
         def _work(session: Session) -> None:
             self._set_receiver_cursor_in_session(
                 session,
@@ -518,16 +565,29 @@ class CatalogRepository:
                 updated_at=now,
             )
             session.add(row)
+            LOGGER.debug(
+                "Catalog cursor created: parser=%s ingested_at=%s product_id=%s",
+                parser_name,
+                ingested_at,
+                product_id,
+            )
             return
 
         row.value = encoded
         row.updated_at = now
+        LOGGER.debug(
+            "Catalog cursor updated: parser=%s ingested_at=%s product_id=%s",
+            parser_name,
+            ingested_at,
+            product_id,
+        )
 
     def _upsert_many_in_session(
         self,
         session: Session,
         records: list[NormalizedProductRecord],
     ) -> None:
+        LOGGER.debug("Catalog session upsert started: records=%s", len(records))
         for record in records:
             canonical_product_id = self._resolve_canonical_product_id(session, record)
             record.canonical_product_id = canonical_product_id
@@ -561,6 +621,7 @@ class CatalogRepository:
                 settlement=settlement,
                 categories=categories,
             )
+        LOGGER.debug("Catalog session upsert completed: records=%s", len(records))
 
     @staticmethod
     def _create_engine(database_url: str) -> Engine:
@@ -660,6 +721,7 @@ class CatalogRepository:
         return _safe_str(record.title_normalized)
 
     def _apply_persistent_image_dedup(self, session: Session, record: NormalizedProductRecord) -> None:
+        original_image_count = len(record.image_urls)
         unique_urls: list[str] = []
         duplicate_urls: list[str] = []
         fingerprints: list[str] = []
@@ -702,6 +764,14 @@ class CatalogRepository:
         record.image_urls = unique_urls
         record.duplicate_image_urls = []
         record.image_fingerprints = fingerprints
+        LOGGER.debug(
+            "Catalog image dedup: parser=%s source_id=%s input=%s unique=%s duplicates=%s",
+            record.parser_name,
+            self._source_id(record),
+            original_image_count,
+            len(unique_urls),
+            len(duplicates_to_delete),
+        )
         self._delete_duplicate_images(duplicates_to_delete)
 
     @staticmethod
@@ -720,9 +790,18 @@ class CatalogRepository:
         if not duplicate_urls:
             return
         if self._storage_repository is None:
+            LOGGER.debug(
+                "Catalog duplicate image cleanup skipped: storage adapter disabled duplicates=%s",
+                len(duplicate_urls),
+            )
             return
 
-        self._storage_repository.delete_images(duplicate_urls)
+        LOGGER.debug("Catalog deleting duplicate images: count=%s", len(duplicate_urls))
+        try:
+            self._storage_repository.delete_images(duplicate_urls)
+        except Exception:
+            LOGGER.exception("Catalog duplicate image delete failed: count=%s", len(duplicate_urls))
+            raise
 
     def _apply_backfill(self, session: Session, record: NormalizedProductRecord) -> None:
         canonical_product_id = _safe_str(record.canonical_product_id)
@@ -744,11 +823,20 @@ class CatalogRepository:
             return
 
         target_time = self._to_utc(record.observed_at)
+        filled = 0
 
         for field_name in missing_fields:
             replacement = self._closest_non_missing(history, field_name, target_time)
             if replacement is not None:
                 setattr(record, field_name, replacement)
+                filled += 1
+        if filled:
+            LOGGER.debug(
+                "Catalog backfill applied: canonical_product_id=%s missing_fields=%s filled_fields=%s",
+                canonical_product_id,
+                len(missing_fields),
+                filled,
+            )
 
     @staticmethod
     def _closest_non_missing(
@@ -901,6 +989,13 @@ class CatalogRepository:
             )
             session.add(row)
             session.flush([row])
+            LOGGER.debug(
+                "Catalog settlement created: parser=%s source_id=%s settlement_id=%s geo_key=%s",
+                record.parser_name,
+                self._source_id(record),
+                row.id,
+                key,
+            )
             return row
 
         row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
@@ -917,6 +1012,13 @@ class CatalogRepository:
         self._fill_missing(row, "latitude", geo.get("latitude"))
         self._fill_missing(row, "longitude", geo.get("longitude"))
 
+        LOGGER.debug(
+            "Catalog settlement updated: parser=%s source_id=%s settlement_id=%s geo_key=%s",
+            record.parser_name,
+            self._source_id(record),
+            row.id,
+            key,
+        )
         return row
 
     def _append_settlement_geodata(
@@ -959,6 +1061,12 @@ class CatalogRepository:
             created_at=_utc_now(),
         )
         session.add(row)
+        LOGGER.debug(
+            "Catalog settlement geodata appended: settlement_id=%s latitude=%.8f longitude=%.8f",
+            settlement.id,
+            latitude,
+            longitude,
+        )
 
     def _upsert_categories(
         self,
@@ -1020,6 +1128,13 @@ class CatalogRepository:
             sort_order = self._to_int(item.get("sort_order"))
             out.append((row, sort_order if sort_order is not None else idx))
 
+        LOGGER.debug(
+            "Catalog categories resolved: parser=%s source_id=%s candidates=%s linked=%s",
+            record.parser_name,
+            self._source_id(record),
+            len(candidates),
+            len(out),
+        )
         return out
 
     def _link_snapshot_categories(
@@ -1259,6 +1374,13 @@ class CatalogRepository:
             session.flush([existing])
             if existing.id is not None:
                 self._replace_product_assets(session, int(existing.id), record, now=now)
+            LOGGER.debug(
+                "Catalog product created: parser=%s source_id=%s product_id=%s canonical_product_id=%s",
+                record.parser_name,
+                source_id,
+                existing.id,
+                existing.canonical_product_id,
+            )
             return
 
         existing.updated_at = now
@@ -1333,6 +1455,13 @@ class CatalogRepository:
             self._replace_product_assets(session, int(existing.id), record, now=now)
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
+        LOGGER.debug(
+            "Catalog product updated: parser=%s source_id=%s product_id=%s canonical_product_id=%s",
+            record.parser_name,
+            source_id,
+            existing.id,
+            existing.canonical_product_id,
+        )
 
     @staticmethod
     def _iter_asset_values(record: NormalizedProductRecord) -> list[tuple[str, list[str]]]:
@@ -1368,6 +1497,7 @@ class CatalogRepository:
                 )
         if rows:
             session.execute(insert(_CatalogProductAsset), rows)
+        LOGGER.debug("Catalog product assets replaced: product_id=%s rows=%s", product_id, len(rows))
 
     def _insert_snapshot_assets(
         self,
@@ -1391,6 +1521,7 @@ class CatalogRepository:
                 )
         if rows:
             session.execute(insert(_CatalogSnapshotAsset), rows)
+        LOGGER.debug("Catalog snapshot assets inserted: snapshot_id=%s rows=%s", snapshot_id, len(rows))
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
@@ -1486,6 +1617,7 @@ class CatalogRepository:
     def _validate_catalog_products_schema(self) -> None:
         inspector = inspect(self._engine)
         if not inspector.has_table("catalog_products"):
+            LOGGER.debug("Catalog schema validation skipped: table catalog_products not found yet")
             return
 
         columns = {item["name"] for item in inspector.get_columns("catalog_products")}
@@ -1521,6 +1653,7 @@ class CatalogRepository:
             )
 
         if not inspector.has_table("catalog_product_snapshots"):
+            LOGGER.debug("Catalog schema validation partially skipped: table catalog_product_snapshots not found yet")
             return
         snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
         snapshot_required = (
@@ -1561,6 +1694,7 @@ class CatalogRepository:
                 raise RuntimeError(
                     f"Schema mismatch: missing table `{table_name}`. Use the current converter schema."
                 )
+        LOGGER.debug("Catalog schema validation passed")
 
     @staticmethod
     def _build_storage_repository_from_env() -> StorageRepository | None:
@@ -1573,6 +1707,7 @@ class CatalogRepository:
             or (os.getenv("STORAGE_API_TOKEN") or "").strip()
         )
         if not base_url or not api_token:
+            LOGGER.debug("Catalog storage adapter disabled: missing base_url or api_token")
             return None
 
         strict_raw = (os.getenv("CONVERTER_STORAGE_DELETE_STRICT") or "0").strip().lower()
@@ -1586,6 +1721,12 @@ class CatalogRepository:
 
         from .storage_http import StorageHTTPRepository
 
+        LOGGER.info(
+            "Catalog storage adapter enabled: base_url=%s fail_on_error=%s timeout_seconds=%.1f",
+            base_url,
+            fail_on_error,
+            timeout_seconds,
+        )
         return StorageHTTPRepository(
             base_url=base_url,
             api_token=api_token,

@@ -7,6 +7,7 @@ import threading
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from time import monotonic
 from typing import Any
 
 from .sync import ConverterSyncService, SyncJob, SyncOutcome
@@ -71,6 +72,7 @@ class ConverterDaemon:
     ) -> None:
         self._sync_service = sync_service or ConverterSyncService()
         self._queue: queue.Queue[object] = queue.Queue(maxsize=max(1, int(max_queue_size)))
+        self._max_queue_size = self._queue.maxsize
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
@@ -86,28 +88,45 @@ class ConverterDaemon:
     def start(self) -> None:
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
+                LOGGER.debug("Converter daemon start skipped: worker already running")
                 return
             self._stop_event.clear()
             self._worker = threading.Thread(target=self._worker_loop, name="converter-worker", daemon=True)
             self._worker.start()
+            LOGGER.info("Converter daemon worker started: max_queue_size=%s", self._max_queue_size)
 
     def stop(self, *, timeout: float = 10.0) -> None:
+        LOGGER.info("Converter daemon stop requested: timeout_sec=%.2f", max(0.1, float(timeout)))
         self._stop_event.set()
         try:
             self._queue.put_nowait(_STOP_SENTINEL)
         except queue.Full:
-            pass
+            LOGGER.debug("Converter daemon stop sentinel was not queued: queue is full")
 
         worker = self._worker
         if worker is not None:
             worker.join(timeout=max(0.1, float(timeout)))
+            if worker.is_alive():
+                LOGGER.warning("Converter daemon worker did not stop before timeout")
+            else:
+                LOGGER.info("Converter daemon worker stopped")
 
     def enqueue(self, job: QueueJob) -> EnqueueResult:
         key = job.dedupe_key()
+        LOGGER.debug(
+            "Queue enqueue requested: key=%s run_id=%s source=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            key,
+            job.run_id,
+            job.source,
+            job.batch_size,
+            job.max_batches,
+            job.txn_chunk_size,
+        )
 
         with self._lock:
             if key in self._pending_keys or key in self._active_keys:
                 self._total_duplicates += 1
+                LOGGER.info("Queue duplicate rejected: key=%s queue_size=%s", key, self._queue.qsize())
                 return EnqueueResult(
                     accepted=False,
                     duplicate=True,
@@ -122,6 +141,7 @@ class ConverterDaemon:
         except queue.Full:
             with self._lock:
                 self._pending_keys.discard(key)
+                LOGGER.warning("Queue full, job rejected: key=%s queue_size=%s", key, self._queue.qsize())
                 return EnqueueResult(
                     accepted=False,
                     duplicate=False,
@@ -133,6 +153,7 @@ class ConverterDaemon:
         with self._lock:
             self._total_enqueued += 1
             queue_size = self._queue.qsize()
+        LOGGER.info("Queue job accepted: key=%s queue_size=%s", key, queue_size)
         return EnqueueResult(
             accepted=True,
             duplicate=False,
@@ -155,32 +176,45 @@ class ConverterDaemon:
             }
 
     def _worker_loop(self) -> None:
+        LOGGER.info("Converter worker loop started")
         while True:
             try:
                 item = self._queue.get(timeout=0.25)
             except queue.Empty:
                 if self._stop_event.is_set():
+                    LOGGER.info("Converter worker loop stopping after stop_event")
                     return
                 continue
 
             if item is _STOP_SENTINEL:
                 self._queue.task_done()
+                LOGGER.info("Converter worker received stop sentinel")
                 return
 
             job = item
             if not isinstance(job, QueueJob):
                 self._queue.task_done()
+                LOGGER.warning("Converter worker skipped unexpected queue item type: %s", type(job).__name__)
                 continue
 
             key = job.dedupe_key()
             with self._lock:
                 self._pending_keys.discard(key)
                 self._active_keys.add(key)
+                queue_size = self._queue.qsize()
+            LOGGER.info(
+                "Queue job started: key=%s run_id=%s parser=%s queue_size=%s",
+                key,
+                job.run_id,
+                job.parser_name,
+                queue_size,
+            )
 
             execution = self._run_job(job)
             if execution.success:
                 LOGGER.info(
-                    "Queue job done: parser=%s run_id=%s batches=%s processed=%s",
+                    "Queue job done: key=%s parser=%s run_id=%s batches=%s processed=%s",
+                    key,
                     job.parser_name,
                     job.run_id,
                     execution.outcome.batches if execution.outcome else 0,
@@ -188,7 +222,8 @@ class ConverterDaemon:
                 )
             else:
                 LOGGER.error(
-                    "Queue job failed: parser=%s run_id=%s error=%s",
+                    "Queue job failed: key=%s parser=%s run_id=%s error=%s",
+                    key,
                     job.parser_name,
                     job.run_id,
                     execution.error,
@@ -200,14 +235,49 @@ class ConverterDaemon:
                     self._total_processed += 1
                 else:
                     self._total_failed += 1
+                pending = len(self._pending_keys)
+                active = len(self._active_keys)
+                queue_size = self._queue.qsize()
+            LOGGER.debug(
+                "Queue job finalized: key=%s queue_size=%s pending=%s active=%s processed=%s failed=%s",
+                key,
+                queue_size,
+                pending,
+                active,
+                self._total_processed,
+                self._total_failed,
+            )
 
             self._queue.task_done()
 
     def _run_job(self, job: QueueJob) -> JobExecution:
+        started_at = monotonic()
+        LOGGER.info(
+            "Sync job execution started: parser=%s run_id=%s batch_size=%s max_batches=%s txn_chunk_size=%s",
+            job.parser_name,
+            job.run_id,
+            job.batch_size,
+            job.max_batches,
+            job.txn_chunk_size,
+        )
         try:
             outcome = self._sync_service.run(job.to_sync_job())
+            LOGGER.info(
+                "Sync job execution finished: parser=%s run_id=%s success=true batches=%s processed=%s elapsed_sec=%.3f",
+                job.parser_name,
+                job.run_id,
+                outcome.batches,
+                outcome.total_processed,
+                monotonic() - started_at,
+            )
             return JobExecution(job=job, success=True, error=None, outcome=outcome)
         except Exception as exc:
+            LOGGER.exception(
+                "Sync job execution failed: parser=%s run_id=%s elapsed_sec=%.3f",
+                job.parser_name,
+                job.run_id,
+                monotonic() - started_at,
+            )
             return JobExecution(job=job, success=False, error=str(exc), outcome=None)
 
 
@@ -243,24 +313,32 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
     server: ConverterDaemonHTTPServer
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path.rstrip("/") in {"/health", "/queue"}:
+        path = self.path.rstrip("/")
+        if path in {"/health", "/queue"}:
+            LOGGER.debug("HTTP GET %s from %s", path, self.address_string())
             self._send_json(HTTPStatus.OK, self.server.converter_daemon.snapshot())
             return
+        LOGGER.warning("HTTP GET unknown path: path=%s client=%s", path, self.address_string())
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.rstrip("/") not in {"/trigger", "/enqueue"}:
+        path = self.path.rstrip("/")
+        if path not in {"/trigger", "/enqueue"}:
+            LOGGER.warning("HTTP POST unknown path: path=%s client=%s", path, self.address_string())
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
+        LOGGER.debug("HTTP POST %s from %s", path, self.address_string())
 
         auth_error = self._check_auth()
         if auth_error is not None:
+            LOGGER.warning("HTTP auth failed: path=%s client=%s reason=%s", path, self.address_string(), auth_error)
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": auth_error})
             return
 
         try:
             payload = self._read_json()
         except ValueError as exc:
+            LOGGER.warning("HTTP invalid payload: path=%s client=%s error=%s", path, self.address_string(), exc)
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
 
@@ -271,9 +349,11 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
         source = _first_non_empty(payload.get("source"), "receiver") or "receiver"
 
         if receiver_db is None:
+            LOGGER.warning("HTTP rejected request: receiver_db is required (path=%s client=%s)", path, self.address_string())
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "receiver_db is required"})
             return
         if catalog_db is None:
+            LOGGER.warning("HTTP rejected request: catalog_db is required (path=%s client=%s)", path, self.address_string())
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "catalog_db is required"})
             return
 
@@ -300,6 +380,17 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
         status = HTTPStatus.ACCEPTED
         if result.reason == "queue_full":
             status = HTTPStatus.TOO_MANY_REQUESTS
+        LOGGER.info(
+            "HTTP enqueue result: path=%s client=%s status=%s accepted=%s duplicate=%s reason=%s key=%s queue_size=%s",
+            path,
+            self.address_string(),
+            int(status),
+            result.accepted,
+            result.duplicate,
+            result.reason,
+            result.key,
+            result.queue_size,
+        )
 
         self._send_json(
             status,
@@ -336,6 +427,7 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict[str, Any]:
         raw_length = (self.headers.get("Content-Length") or "").strip()
         if not raw_length:
+            LOGGER.debug("HTTP request without body: path=%s", self.path.rstrip("/"))
             return {}
 
         try:
@@ -343,6 +435,7 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             raise ValueError("invalid Content-Length") from exc
 
+        LOGGER.debug("HTTP reading JSON body: path=%s content_length=%s", self.path.rstrip("/"), length)
         body = self.rfile.read(length)
         if not body:
             return {}
@@ -361,6 +454,12 @@ class ConverterDaemonRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+        LOGGER.debug(
+            "HTTP response sent: path=%s status=%s bytes=%s",
+            self.path.rstrip("/"),
+            int(status),
+            len(encoded),
+        )
 
 
 def _first_non_empty(value: Any, fallback: str | None) -> str | None:
