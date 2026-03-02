@@ -618,11 +618,25 @@ class CatalogRepository:
             self._apply_persistent_image_dedup(session, record)
             self._apply_backfill(session, record)
 
-            settlement = self._upsert_settlement(session, record)
-            snapshot = self._insert_product_snapshot(session, record, settlement=settlement)
-            self._append_settlement_geodata(session, settlement=settlement, record=record)
+            payload = self._source_payload(record)
+            payload_nodes = _flatten_payload_nodes(payload)
 
-            categories = self._upsert_categories(session, record)
+            settlement = self._upsert_settlement(session, record, payload=payload)
+            snapshot = self._insert_product_snapshot(
+                session,
+                record,
+                settlement=settlement,
+                payload=payload,
+                payload_nodes=payload_nodes,
+            )
+            self._append_settlement_geodata(
+                session,
+                settlement=settlement,
+                record=record,
+                payload=payload,
+            )
+
+            categories = self._upsert_categories(session, record, payload=payload)
             self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
 
             self._upsert_product_source(session, record, snapshot=snapshot)
@@ -631,6 +645,7 @@ class CatalogRepository:
                 record,
                 settlement=settlement,
                 categories=categories,
+                payload_nodes=payload_nodes,
             )
 
     @staticmethod
@@ -800,6 +815,10 @@ class CatalogRepository:
         if canonical_product_id is None:
             return
 
+        missing_fields = [field_name for field_name in self.BACKFILL_FIELDS if _is_missing(getattr(record, field_name))]
+        if not missing_fields:
+            return
+
         history = session.scalars(
             select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.canonical_product_id == canonical_product_id)
         ).all()
@@ -812,11 +831,7 @@ class CatalogRepository:
 
         target_time = self._to_utc(record.observed_at)
 
-        for field_name in self.BACKFILL_FIELDS:
-            current_value = getattr(record, field_name)
-            if not _is_missing(current_value):
-                continue
-
+        for field_name in missing_fields:
             replacement = self._closest_non_missing(history, field_name, target_time)
             if replacement is not None:
                 setattr(record, field_name, replacement)
@@ -849,9 +864,10 @@ class CatalogRepository:
         record: NormalizedProductRecord,
         *,
         settlement: _CatalogSettlement | None,
+        payload: dict[str, Any],
+        payload_nodes: list[tuple[str, str, str | None]],
     ) -> _CatalogProductSnapshot:
         now = _utc_now()
-        payload = self._source_payload(record)
 
         snapshot = _CatalogProductSnapshot(
             canonical_product_id=record.canonical_product_id or str(uuid4()),
@@ -897,7 +913,12 @@ class CatalogRepository:
         session.flush([snapshot])
         if snapshot.id is not None:
             self._insert_snapshot_assets(session, int(snapshot.id), record, now=now)
-            self._insert_snapshot_payload_nodes(session, int(snapshot.id), payload, now=now)
+            self._insert_snapshot_payload_nodes(
+                session,
+                int(snapshot.id),
+                payload_nodes=payload_nodes,
+                now=now,
+            )
         return snapshot
 
     def _upsert_product_source(
@@ -939,8 +960,10 @@ class CatalogRepository:
         self,
         session: Session,
         record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
     ) -> _CatalogSettlement | None:
-        geo = self._extract_geo_components(record)
+        geo = self._extract_geo_components(record, payload=payload)
         if geo is None:
             return None
 
@@ -995,11 +1018,11 @@ class CatalogRepository:
         *,
         settlement: _CatalogSettlement | None,
         record: NormalizedProductRecord,
+        payload: dict[str, Any],
     ) -> None:
         if settlement is None or settlement.id is None:
             return
 
-        payload = self._source_payload(record)
         latitude, longitude = self._extract_geo_coordinates(payload)
         if latitude is None or longitude is None:
             return
@@ -1034,8 +1057,10 @@ class CatalogRepository:
         self,
         session: Session,
         record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
     ) -> list[tuple[_CatalogCategory, int]]:
-        candidates = self._extract_category_candidates(record)
+        candidates = self._extract_category_candidates(record, payload=payload)
         if not candidates:
             return []
 
@@ -1126,9 +1151,12 @@ class CatalogRepository:
                 if idx == 0:
                     link.is_primary = True
 
-    def _extract_geo_components(self, record: NormalizedProductRecord) -> dict[str, object] | None:
-        payload = self._source_payload(record)
-
+    def _extract_geo_components(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, object] | None:
         country = _safe_str(payload.get("receiver_geo_country"))
         region = _safe_str(payload.get("receiver_geo_region"))
         name = _safe_str(payload.get("receiver_geo_name"))
@@ -1195,8 +1223,12 @@ class CatalogRepository:
 
         return None, None
 
-    def _extract_category_candidates(self, record: NormalizedProductRecord) -> list[dict[str, object]]:
-        payload = self._source_payload(record)
+    def _extract_category_candidates(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+    ) -> list[dict[str, object]]:
         raw = payload.get("receiver_categories")
 
         out: list[dict[str, object]] = []
@@ -1270,9 +1302,9 @@ class CatalogRepository:
         *,
         settlement: _CatalogSettlement | None,
         categories: list[tuple[_CatalogCategory, int]],
+        payload_nodes: list[tuple[str, str, str | None]],
     ) -> None:
         now = _utc_now()
-        payload = self._source_payload(record)
         source_id = self._source_id(record)
         primary_category_id = self._primary_category_id(categories)
         settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
@@ -1327,7 +1359,12 @@ class CatalogRepository:
             session.flush([existing])
             if existing.id is not None:
                 self._replace_product_assets(session, int(existing.id), record, now=now)
-                self._replace_product_payload_nodes(session, int(existing.id), payload, now=now)
+                self._replace_product_payload_nodes(
+                    session,
+                    int(existing.id),
+                    payload_nodes=payload_nodes,
+                    now=now,
+                )
             return
 
         existing.updated_at = now
@@ -1401,7 +1438,12 @@ class CatalogRepository:
         if existing.id is not None and record.image_urls:
             self._replace_product_assets(session, int(existing.id), record, now=now)
         if existing.id is not None:
-            self._replace_product_payload_nodes(session, int(existing.id), payload, now=now)
+            self._replace_product_payload_nodes(
+                session,
+                int(existing.id),
+                payload_nodes=payload_nodes,
+                now=now,
+            )
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
 
@@ -1467,15 +1509,15 @@ class CatalogRepository:
         self,
         session: Session,
         product_id: int,
-        payload: dict[str, Any],
         *,
+        payload_nodes: list[tuple[str, str, str | None]],
         now: datetime,
     ) -> None:
         session.execute(
             delete(_CatalogProductPayloadNode).where(_CatalogProductPayloadNode.product_id == int(product_id))
         )
         rows: list[dict[str, Any]] = []
-        for path, node_type, value_text in _flatten_payload_nodes(payload):
+        for path, node_type, value_text in payload_nodes:
             path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
             rows.append(
                 {
@@ -1495,12 +1537,12 @@ class CatalogRepository:
         self,
         session: Session,
         snapshot_id: int,
-        payload: dict[str, Any],
         *,
+        payload_nodes: list[tuple[str, str, str | None]],
         now: datetime,
     ) -> None:
         rows: list[dict[str, Any]] = []
-        for path, node_type, value_text in _flatten_payload_nodes(payload):
+        for path, node_type, value_text in payload_nodes:
             path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
             rows.append(
                 {
