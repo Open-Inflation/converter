@@ -25,7 +25,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from converter.core.models import NormalizedProductRecord
@@ -358,7 +358,8 @@ class CatalogRepository:
         "package_quantity",
         "package_unit",
     )
-    _RETRYABLE_MYSQL_ERROR_CODES = {1205, 1213}
+    _RETRYABLE_MYSQL_OPERATIONAL_ERROR_CODES = {1205, 1213}
+    _RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES = {1062}
     _TXN_RETRY_ATTEMPTS = 5
     _TXN_RETRY_BASE_DELAY_SEC = 0.2
     _TXN_RETRY_MAX_DELAY_SEC = 2.0
@@ -511,10 +512,19 @@ class CatalogRepository:
                     work(session)
                     session.commit()
                 return
-            except OperationalError as exc:
+            except (OperationalError, IntegrityError) as exc:
                 code = self._extract_mysql_error_code(exc)
+                is_retryable_operational = (
+                    isinstance(exc, OperationalError)
+                    and code in self._RETRYABLE_MYSQL_OPERATIONAL_ERROR_CODES
+                )
+                is_retryable_integrity = (
+                    isinstance(exc, IntegrityError)
+                    and code in self._RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES
+                )
                 if (
-                    code not in self._RETRYABLE_MYSQL_ERROR_CODES
+                    not is_retryable_operational
+                    and not is_retryable_integrity
                     or attempt >= self._TXN_RETRY_ATTEMPTS
                 ):
                     raise
@@ -524,8 +534,9 @@ class CatalogRepository:
                     self._TXN_RETRY_MAX_DELAY_SEC,
                 )
                 LOGGER.warning(
-                    "Transient DB error on %s (mysql_code=%s, attempt=%s/%s). Retrying in %.2fs.",
+                    "Transient DB error on %s (error_type=%s, mysql_code=%s, attempt=%s/%s). Retrying in %.2fs.",
                     operation_name,
+                    type(exc).__name__,
                     code,
                     attempt,
                     self._TXN_RETRY_ATTEMPTS,
@@ -534,9 +545,11 @@ class CatalogRepository:
                 sleep(delay)
 
     @staticmethod
-    def _extract_mysql_error_code(exc: OperationalError) -> int | None:
+    def _extract_mysql_error_code(exc: Exception) -> int | None:
         original = getattr(exc, "orig", None)
         args = getattr(original, "args", None)
+        if args is None:
+            args = getattr(exc, "args", None)
         if not isinstance(args, tuple) or not args:
             return None
         code = args[0]

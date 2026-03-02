@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
 from converter.core.models import NormalizedProductRecord, RawProductRecord
@@ -52,6 +52,22 @@ class _DeadlockOnceCatalogRepository(CatalogSQLiteRepository):
                 "UPDATE catalog_products SET updated_at = ...",
                 {"product_id": 1},
                 RuntimeError(1213, "Deadlock found when trying to get lock; try restarting transaction"),
+            )
+        return super()._upsert_many_in_session(session, records)
+
+
+class _DuplicateKeyOnceCatalogRepository(CatalogSQLiteRepository):
+    def __init__(self, db_path: str | Path) -> None:
+        super().__init__(db_path)
+        self.injected_duplicate_keys = 0
+
+    def _upsert_many_in_session(self, session, records):  # type: ignore[override]
+        if self.injected_duplicate_keys == 0:
+            self.injected_duplicate_keys += 1
+            raise IntegrityError(
+                "INSERT INTO catalog_identity_map (...) VALUES (...)",
+                {"parser_name": "fixprice"},
+                RuntimeError(1062, "Duplicate entry for key 'catalog_identity_map.PRIMARY'"),
             )
         return super()._upsert_many_in_session(session, records)
 
@@ -510,6 +526,45 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 products = conn.execute(
                     "SELECT COUNT(*) AS cnt FROM catalog_products WHERE source_id = ?",
                     ("receiver:run-retry:1",),
+                ).fetchone()
+                assert products is not None
+                self.assertEqual(int(products["cnt"]), 1)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_many_retries_on_mysql_duplicate_key(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = _DuplicateKeyOnceCatalogRepository(db_path)
+            record = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Duplicate key retry",
+                title_normalized="duplicate key retry",
+                title_original_no_stopwords="duplicate key retry",
+                title_normalized_no_stopwords="duplicate key retry",
+                brand=None,
+                unit="PCE",
+                available_count=1.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-dupkey:1",
+                observed_at=datetime(2026, 2, 28, tzinfo=timezone.utc),
+                source_payload={"receiver_product_id": 304},
+            )
+
+            with patch("converter.adapters.catalog.sleep", return_value=None):
+                repo.upsert_many([record])
+
+            self.assertEqual(repo.injected_duplicate_keys, 1)
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                products = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM catalog_products WHERE source_id = ?",
+                    ("receiver:run-dupkey:1",),
                 ).fetchone()
                 assert products is not None
                 self.assertEqual(int(products["cnt"]), 1)
