@@ -8,6 +8,10 @@ DIM_CM_RE = re.compile(
     r"(?P<a>\d+(?:[.,]\d+)?)\s*[xх×]\s*(?P<b>\d+(?:[.,]\d+)?)(?:\s*[xх×]\s*(?P<c>\d+(?:[.,]\d+)?))?\s*см\b",
     re.IGNORECASE,
 )
+DIM_GENERIC_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*[xх×]\s*\d+(?:[.,]\d+)?(?:\s*[xх×]\s*\d+(?:[.,]\d+)?)?",
+    re.IGNORECASE,
+)
 
 WVL_RE = re.compile(r"(?P<q>\d+(?:[.,]\d+)?)\s*(?P<u>г|кг|мл|л|l)\b", re.IGNORECASE)
 

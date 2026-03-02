@@ -44,6 +44,22 @@ class FixPriceHandlerTests(unittest.TestCase):
         self.assertEqual(result.original_name_no_stopwords.split()[0], "хлебцы")
         self.assertEqual(result.name_normalized.split()[0], "хлебец")
 
+    def test_title_parser_does_not_treat_dimensions_as_brand(self) -> None:
+        result = self.handler.normalize_title("Пакет подарочный, 12х14, в ассортименте")
+
+        self.assertEqual(result.name_original, "Пакет подарочный")
+        self.assertIsNone(result.brand)
+
+    def test_handle_drops_dimension_like_raw_brand(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Пакет подарочный, в ассортименте",
+            brand="12х14",
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertIsNone(normalized.brand)
+
     def test_category_normalization_removes_separators_and_lemmatizes(self) -> None:
         result = self.handler.normalize_category("молочные продукты, яйца")
 

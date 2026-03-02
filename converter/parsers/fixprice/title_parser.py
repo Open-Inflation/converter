@@ -5,7 +5,7 @@ import re
 from converter.core.models import PackageUnit, TitleNormalizationResult, Unit
 from converter.parsers.normalizers import RussianTextNormalizer
 
-from .patterns import ASSORT_RE, BY_VOLUME_RE, BY_WEIGHT_RE, DIM_CM_RE, WVL_RE
+from .patterns import ASSORT_RE, BY_VOLUME_RE, BY_WEIGHT_RE, DIM_CM_RE, DIM_GENERIC_RE, WVL_RE
 
 
 def _to_float(value: str) -> float:
@@ -61,7 +61,12 @@ def _guess_brand(parts: list[str], normalizer: RussianTextNormalizer) -> str | N
         return None
 
     candidate = parts[1]
-    if DIM_CM_RE.search(candidate) or WVL_RE.search(candidate) or re.search(r"\b\d+\b", candidate):
+    if (
+        DIM_CM_RE.search(candidate)
+        or DIM_GENERIC_RE.search(candidate)
+        or WVL_RE.search(candidate)
+        or re.search(r"\b\d+\b", candidate)
+    ):
         return None
 
     if len(normalizer.clean_text(candidate)) < 2:
