@@ -400,18 +400,6 @@ class _CatalogIngestStageAsset(_CatalogBase):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (
-        UniqueConstraint(
-            "chunk_id",
-            "parser_name",
-            "source_id",
-            "asset_kind",
-            "sort_order",
-            "value",
-            name="uq_catalog_stage_assets_entry",
-        ),
-    )
-
 
 class _CatalogIngestStageCategory(_CatalogBase):
     __tablename__ = "catalog_ingest_stage_categories"
