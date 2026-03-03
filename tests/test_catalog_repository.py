@@ -109,17 +109,17 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_products)").fetchall()
                 }
+                product_types = {
+                    str(row["name"]): str(row["type"]).upper()
+                    for row in conn.execute("PRAGMA table_info(catalog_products)").fetchall()
+                }
                 snapshot_columns = {
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
                 }
-                snapshot_event_columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info(catalog_snapshot_events)").fetchall()
-                }
-                snapshot_available_columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info(catalog_snapshot_available_counts)").fetchall()
+                snapshot_types = {
+                    str(row["name"]): str(row["type"]).upper()
+                    for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
                 }
 
                 self.assertIn("title_original", product_columns)
@@ -132,22 +132,36 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("image_urls_json", product_columns)
                 self.assertNotIn("duplicate_image_urls_json", product_columns)
                 self.assertNotIn("image_fingerprints_json", product_columns)
+                self.assertTrue(
+                    "DECIMAL" in product_types["price"] or "NUMERIC" in product_types["price"]
+                )
+                self.assertTrue(
+                    "DECIMAL" in product_types["discount_price"]
+                    or "NUMERIC" in product_types["discount_price"]
+                )
+                self.assertTrue(
+                    "DECIMAL" in product_types["loyal_price"]
+                    or "NUMERIC" in product_types["loyal_price"]
+                )
 
                 self.assertIn("price", snapshot_columns)
                 self.assertIn("discount_price", snapshot_columns)
                 self.assertIn("loyal_price", snapshot_columns)
                 self.assertIn("price_unit", snapshot_columns)
-                self.assertNotIn("canonical_product_id", snapshot_columns)
-                self.assertNotIn("parser_name", snapshot_columns)
-                self.assertNotIn("source_id", snapshot_columns)
-                self.assertNotIn("content_fingerprint", snapshot_columns)
-                self.assertNotIn("valid_from_at", snapshot_columns)
-                self.assertNotIn("valid_to_at", snapshot_columns)
+                self.assertIn("available_count", snapshot_columns)
+                self.assertIn("canonical_product_id", snapshot_columns)
+                self.assertIn("parser_name", snapshot_columns)
+                self.assertIn("source_id", snapshot_columns)
+                self.assertIn("source_event_uid", snapshot_columns)
+                self.assertIn("content_fingerprint", snapshot_columns)
+                self.assertIn("valid_from_at", snapshot_columns)
+                self.assertIn("valid_to_at", snapshot_columns)
+                self.assertIn("observed_at", snapshot_columns)
+                self.assertIn("created_at", snapshot_columns)
                 self.assertNotIn("title_original", snapshot_columns)
                 self.assertNotIn("title_normalized_no_stopwords", snapshot_columns)
                 self.assertNotIn("description", snapshot_columns)
                 self.assertNotIn("composition_original", snapshot_columns)
-                self.assertNotIn("available_count", snapshot_columns)
                 self.assertNotIn("package_quantity", snapshot_columns)
                 self.assertNotIn("package_unit", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
@@ -156,19 +170,17 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("image_urls_json", snapshot_columns)
                 self.assertNotIn("duplicate_image_urls_json", snapshot_columns)
                 self.assertNotIn("image_fingerprints_json", snapshot_columns)
-                self.assertIn("id", snapshot_event_columns)
-                self.assertIn("canonical_product_id", snapshot_event_columns)
-                self.assertIn("parser_name", snapshot_event_columns)
-                self.assertIn("source_id", snapshot_event_columns)
-                self.assertIn("source_event_uid", snapshot_event_columns)
-                self.assertIn("content_fingerprint", snapshot_event_columns)
-                self.assertIn("valid_from_at", snapshot_event_columns)
-                self.assertIn("valid_to_at", snapshot_event_columns)
-                self.assertIn("snapshot_id", snapshot_available_columns)
-                self.assertIn("available_count", snapshot_available_columns)
-                self.assertIn("created_at", snapshot_available_columns)
-                self.assertNotIn("valid_from_at", snapshot_available_columns)
-                self.assertNotIn("valid_to_at", snapshot_available_columns)
+                self.assertTrue(
+                    "DECIMAL" in snapshot_types["price"] or "NUMERIC" in snapshot_types["price"]
+                )
+                self.assertTrue(
+                    "DECIMAL" in snapshot_types["discount_price"]
+                    or "NUMERIC" in snapshot_types["discount_price"]
+                )
+                self.assertTrue(
+                    "DECIMAL" in snapshot_types["loyal_price"]
+                    or "NUMERIC" in snapshot_types["loyal_price"]
+                )
 
                 tables = {
                     str(row["name"])
@@ -177,8 +189,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ).fetchall()
                 }
                 self.assertIn("catalog_product_assets", tables)
-                self.assertIn("catalog_snapshot_events", tables)
-                self.assertIn("catalog_snapshot_available_counts", tables)
+                self.assertIn("catalog_product_snapshots", tables)
+                self.assertNotIn("catalog_snapshot_events", tables)
+                self.assertNotIn("catalog_snapshot_available_counts", tables)
                 self.assertNotIn("catalog_snapshot_assets", tables)
                 self.assertNotIn("catalog_product_payload_nodes", tables)
             finally:
@@ -186,7 +199,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_migration_prunes_legacy_snapshot_schema(self) -> None:
+    def test_schema_validation_rejects_legacy_snapshot_schema(self) -> None:
         db_path = self._make_db()
         try:
             conn = sqlite3.connect(db_path)
@@ -273,79 +286,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             finally:
                 conn.close()
 
-            repo = CatalogSQLiteRepository(db_path, validate_schema=False)
-            repo.migrate_schema()
-            CatalogSQLiteRepository(db_path)
-
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            try:
-                snapshot_columns = {
-                    str(row["name"])
-                    for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
-                }
-                self.assertNotIn("available_count", snapshot_columns)
-                self.assertNotIn("title_original", snapshot_columns)
-                self.assertNotIn("composition_original", snapshot_columns)
-                self.assertNotIn("settlement_id", snapshot_columns)
-
-                legacy_table = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_assets'"
-                ).fetchone()
-                self.assertIsNone(legacy_table)
-
-                available_row = conn.execute(
-                    """
-                    SELECT available_count, created_at
-                    FROM catalog_snapshot_available_counts
-                    WHERE snapshot_id = ?
-                    """,
-                    (1,),
-                ).fetchone()
-                self.assertIsNotNone(available_row)
-                assert available_row is not None
-                self.assertAlmostEqual(float(available_row["available_count"]), 7.0, places=3)
-                self.assertIn("2026-02-28", str(available_row["created_at"]))
-
-                event_row = conn.execute(
-                    """
-                    SELECT valid_from_at, valid_to_at
-                    FROM catalog_snapshot_events
-                    WHERE id = ?
-                    """,
-                    (1,),
-                ).fetchone()
-                self.assertIsNotNone(event_row)
-                assert event_row is not None
-                self.assertIn("2026-02-28", str(event_row["valid_from_at"]))
-                self.assertIn("10:00:00", str(event_row["valid_from_at"]))
-                self.assertIn("2026-02-28", str(event_row["valid_to_at"]))
-                self.assertIn("10:00:00", str(event_row["valid_to_at"]))
-
-                snapshot_price_fk = conn.execute(
-                    "PRAGMA foreign_key_list(catalog_product_snapshots)"
-                ).fetchall()
-                self.assertTrue(
-                    any(
-                        str(row["table"]) == "catalog_snapshot_events"
-                        and str(row["from"]) == "id"
-                        and str(row["to"]) == "id"
-                        for row in snapshot_price_fk
-                    )
-                )
-                snapshot_available_fk = conn.execute(
-                    "PRAGMA foreign_key_list(catalog_snapshot_available_counts)"
-                ).fetchall()
-                self.assertTrue(
-                    any(
-                        str(row["table"]) == "catalog_snapshot_events"
-                        and str(row["from"]) == "snapshot_id"
-                        and str(row["to"]) == "id"
-                        for row in snapshot_available_fk
-                    )
-                )
-            finally:
-                conn.close()
+            with self.assertRaises(RuntimeError):
+                CatalogSQLiteRepository(db_path)
         finally:
             db_path.unlink(missing_ok=True)
 
@@ -420,11 +362,18 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
                 snapshot = conn.execute(
                     """
-                    SELECT cps.id, cps.price, cps.discount_price, cps.loyal_price, cps.price_unit,
-                           cse.valid_from_at, cse.valid_to_at
-                    FROM catalog_product_snapshots AS cps
-                    JOIN catalog_snapshot_events AS cse ON cse.id = cps.id
-                    WHERE cse.parser_name = ? AND cse.source_id = ?
+                    SELECT
+                        id,
+                        price,
+                        discount_price,
+                        loyal_price,
+                        price_unit,
+                        available_count,
+                        valid_from_at,
+                        valid_to_at,
+                        created_at
+                    FROM catalog_product_snapshots
+                    WHERE parser_name = ? AND source_id = ?
                     """,
                     ("fixprice", "receiver:run-price:1"),
                 ).fetchone()
@@ -434,18 +383,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(snapshot["discount_price"]), 149.9, places=3)
                 self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
                 self.assertEqual(snapshot["price_unit"], "RUB")
-                available = conn.execute(
-                    """
-                    SELECT available_count, created_at
-                    FROM catalog_snapshot_available_counts
-                    WHERE snapshot_id = ?
-                    """,
-                    (int(snapshot["id"]),),
-                ).fetchone()
-                self.assertIsNotNone(available)
-                assert available is not None
-                self.assertAlmostEqual(float(available["available_count"]), 1.0, places=3)
-                self.assertIn("2026-02-28", str(available["created_at"]))
+                self.assertAlmostEqual(float(snapshot["available_count"]), 1.0, places=3)
+                self.assertIn("2026-02-28", str(snapshot["created_at"]))
                 self.assertIn("2026-02-28", str(snapshot["valid_from_at"]))
                 self.assertIn("2026-02-28", str(snapshot["valid_to_at"]))
                 snapshot_payload_table = conn.execute(
@@ -913,8 +852,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 snapshots = conn.execute(
                     """
-                    SELECT id, content_fingerprint, valid_from_at, valid_to_at
-                    FROM catalog_snapshot_events
+                    SELECT id, content_fingerprint, valid_from_at, valid_to_at, available_count, created_at
+                    FROM catalog_product_snapshots
                     WHERE parser_name = ? AND source_id = ?
                     ORDER BY id ASC
                     """,
@@ -924,17 +863,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(snapshots[0]["content_fingerprint"])
                 self.assertIn("2026-02-28 10:00:00", str(snapshots[0]["valid_from_at"]))
                 self.assertIn("2026-02-28 11:00:00", str(snapshots[0]["valid_to_at"]))
-                available_rows = conn.execute(
-                    """
-                    SELECT available_count, created_at
-                    FROM catalog_snapshot_available_counts
-                    WHERE snapshot_id = ?
-                    """,
-                    (int(snapshots[0]["id"]),),
-                ).fetchall()
-                self.assertEqual(len(available_rows), 1)
-                self.assertAlmostEqual(float(available_rows[0]["available_count"]), 10.0, places=3)
-                self.assertIn("2026-02-28", str(available_rows[0]["created_at"]))
+                self.assertAlmostEqual(float(snapshots[0]["available_count"]), 10.0, places=3)
+                self.assertIn("2026-02-28", str(snapshots[0]["created_at"]))
             finally:
                 conn.close()
         finally:
@@ -994,7 +924,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 snapshots = conn.execute(
                     """
                     SELECT COUNT(*) AS cnt
-                    FROM catalog_snapshot_events
+                    FROM catalog_product_snapshots
                     WHERE parser_name = ? AND source_id = ?
                     """,
                     ("fixprice", "receiver:run-nonvolatile:1"),

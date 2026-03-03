@@ -45,9 +45,9 @@ converter/
 
 `catalog` теперь хранит данные не только в projection-таблице, а в нормализованной структуре с историей:
 
-- `catalog_snapshot_events` - append-only события снапшотов (source/cursor/fingerprint + `valid_from_at/valid_to_at`).
-- `catalog_product_snapshots` - волатильные ценовые параметры (`price/discount_price/loyal_price/price_unit`) по `snapshot_event_id`.
-- `catalog_snapshot_available_counts` - история `available_count` по `snapshot_event_id` (отдельно от цен).
+- `catalog_product_snapshots` - append-only снапшоты по волатильным полям:
+  `price/discount_price/loyal_price/price_unit`, `available_count`,
+  плюс event-контракт (`source_event_uid`, `content_fingerprint`, `valid_from_at/valid_to_at`, `observed_at`, `created_at`).
 - `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
 - `catalog_settlement_geodata` - история геоточек (`lat/lon`) по settlement.
@@ -61,18 +61,11 @@ converter/
 `catalog_product_snapshots` не сохраняются.
 
 Converter сохраняет расширенный product-контракт в `catalog_products` (current projection),
-а snapshot-историю ведет через `catalog_snapshot_events` + отдельные value-таблицы (цены и `available_count`).
-Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-поля и таблицу `catalog_snapshot_assets`.
+а snapshot-историю ведет через единую таблицу `catalog_product_snapshots`.
+Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-таблицы и лишние snapshot-поля.
 Автоматической миграции в `CatalogRepository` больше нет: запуск migration выполняется вручную отдельной командой.
 
-Ручной запуск миграции:
-
-```bash
-.venv/bin/python migrate_catalog_schema.py --catalog-db ./data/catalog.db --log-level INFO
-.venv/bin/python migrate_catalog_schema.py --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog?charset=utf8mb4' --log-level INFO
-```
-
-Ручной SQL-вариант для MySQL:
+Ручная миграция выполняется только SQL-скриптом:
 
 ```bash
 mysql -u user -p -D catalog < sql/migrations/20260303_snapshot_events_mysql.sql
