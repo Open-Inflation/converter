@@ -327,6 +327,10 @@ BEGIN
     DROP TABLE IF EXISTS catalog_snapshot_available_counts;
     DROP TABLE IF EXISTS catalog_snapshot_assets;
 
+    -- Ensure PK id is auto-generated for new inserts after any rebuild path.
+    ALTER TABLE catalog_product_snapshots
+        MODIFY COLUMN id INTEGER NOT NULL AUTO_INCREMENT;
+
     -- Ensure snapshot indexes/constraints.
     IF NOT EXISTS (
         SELECT 1
