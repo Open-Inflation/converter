@@ -45,22 +45,24 @@ converter/
 
 `catalog` теперь хранит данные не только в projection-таблице, а в нормализованной структуре с историей:
 
-- `catalog_product_snapshots` - append-only история версий товара (каждый проход sync добавляет snapshot, без перетирания прошлого).
+- `catalog_snapshot_events` - append-only события снапшотов (source/cursor/fingerprint + `valid_from_at/valid_to_at`).
+- `catalog_product_snapshots` - волатильные ценовые параметры (`price/discount_price/loyal_price/price_unit`) по `snapshot_event_id`.
+- `catalog_snapshot_available_counts` - история `available_count` по `snapshot_event_id` (отдельно от цен).
 - `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
 - `catalog_settlement_geodata` - история геоточек (`lat/lon`) по settlement.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent).
 - `catalog_product_category_links` - связи snapshot -> category.
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
-- `catalog_product_assets` / `catalog_snapshot_assets` - массивные поля товара (image urls, duplicates, fingerprints) в нормализованном виде.
+- `catalog_product_assets` - массивные поля текущей проекции товара (image urls, duplicates, fingerprints) в нормализованном виде.
 
 Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
 `catalog_product_snapshots` не сохраняются.
 
-Converter сохраняет расширенный product-контракт: в snapshots/current projection
-пишутся цены (`price/discount_price/loyal_price/price_unit`), product-флаги и producer/rating,
-оригинальный и нормализованный состав (`composition_original` / `composition_normalized`).
+Converter сохраняет расширенный product-контракт в `catalog_products` (current projection),
+а snapshot-историю ведет через `catalog_snapshot_events` + отдельные value-таблицы (цены и `available_count`).
+Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-поля и таблицу `catalog_snapshot_assets`.
 
 Политика обновления:
 

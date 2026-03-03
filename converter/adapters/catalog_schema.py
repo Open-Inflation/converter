@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
+    ForeignKey,
     Float,
     Integer,
     String,
@@ -112,8 +113,8 @@ class _CatalogProduct(_CatalogBase):
     )
 
 
-class _CatalogProductSnapshot(_CatalogBase):
-    __tablename__ = "catalog_product_snapshots"
+class _CatalogSnapshotEvent(_CatalogBase):
+    __tablename__ = "catalog_snapshot_events"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
 
@@ -126,39 +127,6 @@ class _CatalogProductSnapshot(_CatalogBase):
     receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     receiver_sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    title_original: Mapped[str] = mapped_column(Text, nullable=False)
-    title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
-
-    brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    producer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    producer_country: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    expiration_date_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    discount_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    loyal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    adult: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    is_new: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    promo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    season: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    hit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    data_matrix: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-
-    unit: Mapped[str] = mapped_column(String(32), nullable=False)
-    available_count: Mapped[float | None] = mapped_column(Float, nullable=True)
-    package_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
-
-    category_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
-    geo_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
-    composition_original: Mapped[str | None] = mapped_column(Text, nullable=True)
-    composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
-    settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-
     source_event_uid: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
     content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     valid_from_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -170,9 +138,35 @@ class _CatalogProductSnapshot(_CatalogBase):
     __table_args__ = (
         UniqueConstraint(
             "source_event_uid",
-            name="uq_cps_event",
+            name="uq_cse_event",
         ),
     )
+
+
+class _CatalogProductSnapshot(_CatalogBase):
+    __tablename__ = "catalog_product_snapshots"
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("catalog_snapshot_events.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    discount_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    loyal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class _CatalogSnapshotAvailableCount(_CatalogBase):
+    __tablename__ = "catalog_snapshot_available_counts"
+
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("catalog_snapshot_events.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    available_count: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class _CatalogProductSource(_CatalogBase):
@@ -291,26 +285,6 @@ class _CatalogProductAsset(_CatalogBase):
     )
 
 
-class _CatalogSnapshotAsset(_CatalogBase):
-    __tablename__ = "catalog_snapshot_assets"
-
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "snapshot_id",
-            "asset_kind",
-            "sort_order",
-            name="uq_catalog_snapshot_assets_slot",
-        ),
-    )
-
-
 class _ConverterSyncState(_CatalogBase):
     __tablename__ = "converter_sync_state"
 
@@ -399,10 +373,11 @@ __all__ = [
     "_CatalogProductAsset",
     "_CatalogProductCategoryLink",
     "_CatalogProductSnapshot",
+    "_CatalogSnapshotEvent",
+    "_CatalogSnapshotAvailableCount",
     "_CatalogProductSource",
     "_CatalogSettlement",
     "_CatalogSettlementGeodata",
-    "_CatalogSnapshotAsset",
     "_CatalogStorageDeleteOutbox",
     "_ConverterSyncState",
     "_as_float",

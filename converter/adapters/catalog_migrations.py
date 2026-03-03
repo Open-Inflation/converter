@@ -12,6 +12,35 @@ LOGGER = logging.getLogger(__name__)
 
 
 class _CatalogSchemaMigrationMixin:
+    _SNAPSHOT_EVENT_COLUMNS = (
+        "id",
+        "canonical_product_id",
+        "parser_name",
+        "source_id",
+        "source_run_id",
+        "receiver_product_id",
+        "receiver_artifact_id",
+        "receiver_sort_order",
+        "source_event_uid",
+        "content_fingerprint",
+        "valid_from_at",
+        "valid_to_at",
+        "observed_at",
+        "created_at",
+    )
+    _SNAPSHOT_PRICE_COLUMNS = (
+        "id",
+        "price",
+        "discount_price",
+        "loyal_price",
+        "price_unit",
+    )
+    _SNAPSHOT_AVAILABLE_COLUMNS = (
+        "snapshot_id",
+        "available_count",
+        "created_at",
+    )
+
     def _validate_catalog_products_schema(self) -> None:
         inspector = inspect(self._engine)
         if not inspector.has_table("catalog_products"):
@@ -34,6 +63,7 @@ class _CatalogSchemaMigrationMixin:
                 "Schema mismatch in `catalog_products`: missing columns "
                 f"{', '.join(missing)}. Use the current converter schema."
             )
+
         forbidden_product_json_columns = [
             name
             for name in (
@@ -50,60 +80,549 @@ class _CatalogSchemaMigrationMixin:
                 f"({', '.join(forbidden_product_json_columns)}). Use normalized tables."
             )
 
-        if not inspector.has_table("catalog_product_snapshots"):
-            LOGGER.debug("Catalog schema validation partially skipped: table catalog_product_snapshots not found yet")
-            return
-        snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
-        snapshot_required = (
-            "price",
-            "discount_price",
-            "loyal_price",
-            "price_unit",
-            "composition_original",
-        )
-        snapshot_missing = [name for name in snapshot_required if name not in snapshot_columns]
-        if snapshot_missing:
-            raise RuntimeError(
-                "Schema mismatch in `catalog_product_snapshots`: missing columns "
-                f"{', '.join(snapshot_missing)}. Use the current converter schema."
-            )
-        forbidden_snapshot_json_columns = [
-            name
-            for name in (
-                "image_urls_json",
-                "duplicate_image_urls_json",
-                "image_fingerprints_json",
-                "source_payload_json",
-            )
-            if name in snapshot_columns
-        ]
-        if forbidden_snapshot_json_columns:
-            raise RuntimeError(
-                "Schema mismatch in `catalog_product_snapshots`: JSON columns are not allowed "
-                f"({', '.join(forbidden_snapshot_json_columns)}). Use normalized tables."
-            )
-
         expected_tables = (
+            "catalog_snapshot_events",
+            "catalog_product_snapshots",
+            "catalog_snapshot_available_counts",
             "catalog_product_assets",
-            "catalog_snapshot_assets",
         )
         for table_name in expected_tables:
             if not inspector.has_table(table_name):
                 raise RuntimeError(
                     f"Schema mismatch: missing table `{table_name}`. Use the current converter schema."
                 )
+
+        event_columns = {item["name"] for item in inspector.get_columns("catalog_snapshot_events")}
+        missing_event_columns = [
+            name for name in self._SNAPSHOT_EVENT_COLUMNS if name not in event_columns
+        ]
+        if missing_event_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_snapshot_events`: missing columns "
+                f"{', '.join(missing_event_columns)}. Use the current converter schema."
+            )
+        unexpected_event_columns = [
+            name for name in event_columns if name not in set(self._SNAPSHOT_EVENT_COLUMNS)
+        ]
+        if unexpected_event_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_snapshot_events`: legacy columns are not allowed "
+                f"({', '.join(sorted(unexpected_event_columns))}). Run one-way migration."
+            )
+
+        price_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        missing_price_columns = [
+            name for name in self._SNAPSHOT_PRICE_COLUMNS if name not in price_columns
+        ]
+        if missing_price_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_snapshots`: missing columns "
+                f"{', '.join(missing_price_columns)}. Use the current converter schema."
+            )
+        unexpected_price_columns = [
+            name for name in price_columns if name not in set(self._SNAPSHOT_PRICE_COLUMNS)
+        ]
+        if unexpected_price_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_snapshots`: legacy columns are not allowed "
+                f"({', '.join(sorted(unexpected_price_columns))}). Run one-way migration."
+            )
+
+        available_columns = {
+            item["name"] for item in inspector.get_columns("catalog_snapshot_available_counts")
+        }
+        missing_available_columns = [
+            name for name in self._SNAPSHOT_AVAILABLE_COLUMNS if name not in available_columns
+        ]
+        if missing_available_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_snapshot_available_counts`: missing columns "
+                f"{', '.join(missing_available_columns)}. Use the current converter schema."
+            )
+        unexpected_available_columns = [
+            name for name in available_columns if name not in set(self._SNAPSHOT_AVAILABLE_COLUMNS)
+        ]
+        if unexpected_available_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_snapshot_available_counts`: legacy columns are not allowed "
+                f"({', '.join(sorted(unexpected_available_columns))}). Run one-way migration."
+            )
+
+        if not self._table_has_fk(
+            inspector,
+            table_name="catalog_product_snapshots",
+            constrained_columns=("id",),
+            referred_table="catalog_snapshot_events",
+            referred_columns=("id",),
+        ):
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_snapshots`: missing FK id -> catalog_snapshot_events.id. "
+                "Run one-way migration."
+            )
+        if not self._table_has_fk(
+            inspector,
+            table_name="catalog_snapshot_available_counts",
+            constrained_columns=("snapshot_id",),
+            referred_table="catalog_snapshot_events",
+            referred_columns=("id",),
+        ):
+            raise RuntimeError(
+                "Schema mismatch in `catalog_snapshot_available_counts`: missing FK snapshot_id -> "
+                "catalog_snapshot_events.id. Run one-way migration."
+            )
+
+        if inspector.has_table("catalog_snapshot_assets"):
+            raise RuntimeError(
+                "Schema mismatch: legacy table `catalog_snapshot_assets` is not allowed. "
+                "Run one-way migration."
+            )
+
         LOGGER.debug("Catalog schema validation passed")
 
-    def _ensure_snapshot_interval_schema(self) -> None:
+    @staticmethod
+    def _table_has_fk(
+        inspector,
+        *,
+        table_name: str,
+        constrained_columns: tuple[str, ...],
+        referred_table: str,
+        referred_columns: tuple[str, ...],
+    ) -> bool:
+        expected_constrained = list(constrained_columns)
+        expected_referred = list(referred_columns)
+        for fk in inspector.get_foreign_keys(table_name):
+            if fk.get("referred_table") != referred_table:
+                continue
+            if (fk.get("constrained_columns") or []) != expected_constrained:
+                continue
+            referred = fk.get("referred_columns") or []
+            if referred and referred != expected_referred:
+                continue
+            return True
+        return False
+
+    def _enforce_snapshot_contract_schema(self) -> None:
         inspector = inspect(self._engine)
         if not inspector.has_table("catalog_product_snapshots"):
             return
+        if not inspector.has_table("catalog_snapshot_events"):
+            return
 
-        snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        dialect = self._engine.dialect.name
+        price_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        event_columns = {item["name"] for item in inspector.get_columns("catalog_snapshot_events")}
+
+        has_legacy_snapshot_event_payload = {
+            "canonical_product_id",
+            "parser_name",
+            "source_id",
+            "observed_at",
+            "created_at",
+        }.issubset(price_columns)
+
+        if has_legacy_snapshot_event_payload:
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_events (
+                                id,
+                                canonical_product_id,
+                                parser_name,
+                                source_id,
+                                source_run_id,
+                                receiver_product_id,
+                                receiver_artifact_id,
+                                receiver_sort_order,
+                                source_event_uid,
+                                content_fingerprint,
+                                valid_from_at,
+                                valid_to_at,
+                                observed_at,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.canonical_product_id,
+                                cps.parser_name,
+                                cps.source_id,
+                                cps.source_run_id,
+                                cps.receiver_product_id,
+                                cps.receiver_artifact_id,
+                                cps.receiver_sort_order,
+                                cps.source_event_uid,
+                                cps.content_fingerprint,
+                                cps.valid_from_at,
+                                cps.valid_to_at,
+                                cps.observed_at,
+                                cps.created_at
+                            FROM catalog_product_snapshots AS cps
+                            LEFT JOIN catalog_snapshot_events AS cse
+                                ON cse.id = cps.id
+                            WHERE cse.id IS NULL
+                            """
+                        )
+                    )
+                elif dialect == "sqlite":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_events (
+                                id,
+                                canonical_product_id,
+                                parser_name,
+                                source_id,
+                                source_run_id,
+                                receiver_product_id,
+                                receiver_artifact_id,
+                                receiver_sort_order,
+                                source_event_uid,
+                                content_fingerprint,
+                                valid_from_at,
+                                valid_to_at,
+                                observed_at,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.canonical_product_id,
+                                cps.parser_name,
+                                cps.source_id,
+                                cps.source_run_id,
+                                cps.receiver_product_id,
+                                cps.receiver_artifact_id,
+                                cps.receiver_sort_order,
+                                cps.source_event_uid,
+                                cps.content_fingerprint,
+                                cps.valid_from_at,
+                                cps.valid_to_at,
+                                cps.observed_at,
+                                cps.created_at
+                            FROM catalog_product_snapshots AS cps
+                            WHERE NOT EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_events AS cse
+                                WHERE cse.id = cps.id
+                            )
+                            """
+                        )
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported dialect for snapshot event migration: {dialect}")
+            LOGGER.info("Catalog snapshot schema migrated: backfilled catalog_snapshot_events")
+
+        if "available_count" in price_columns and inspector.has_table("catalog_snapshot_available_counts"):
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_available_counts (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.available_count,
+                                COALESCE(cps.created_at, cps.observed_at, UTC_TIMESTAMP(6))
+                            FROM catalog_product_snapshots AS cps
+                            INNER JOIN catalog_snapshot_events AS cse
+                                ON cse.id = cps.id
+                            LEFT JOIN catalog_snapshot_available_counts AS csac
+                                ON csac.snapshot_id = cps.id
+                            WHERE csac.snapshot_id IS NULL
+                            """
+                        )
+                    )
+                elif dialect == "sqlite":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_available_counts (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.available_count,
+                                COALESCE(cps.created_at, cps.observed_at, CURRENT_TIMESTAMP)
+                            FROM catalog_product_snapshots AS cps
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_events AS cse
+                                WHERE cse.id = cps.id
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_available_counts AS csac
+                                WHERE csac.snapshot_id = cps.id
+                            )
+                            """
+                        )
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported dialect for snapshot available migration: {dialect}")
+
+        inspector = inspect(self._engine)
+        price_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        unexpected_price_columns = [
+            name for name in price_columns if name not in set(self._SNAPSHOT_PRICE_COLUMNS)
+        ]
+        has_price_fk = self._table_has_fk(
+            inspector,
+            table_name="catalog_product_snapshots",
+            constrained_columns=("id",),
+            referred_table="catalog_snapshot_events",
+            referred_columns=("id",),
+        )
+
+        if unexpected_price_columns or not has_price_fk:
+            with self._engine.begin() as connection:
+                if dialect == "sqlite":
+                    connection.execute(text("DROP TABLE IF EXISTS catalog_product_snapshots__new"))
+                    connection.execute(
+                        text(
+                            """
+                            CREATE TABLE catalog_product_snapshots__new (
+                                id INTEGER NOT NULL PRIMARY KEY,
+                                price FLOAT NULL,
+                                discount_price FLOAT NULL,
+                                loyal_price FLOAT NULL,
+                                price_unit VARCHAR(32) NULL,
+                                FOREIGN KEY(id) REFERENCES catalog_snapshot_events(id) ON DELETE CASCADE
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_product_snapshots__new (id, price, discount_price, loyal_price, price_unit)
+                            SELECT
+                                id,
+                                price,
+                                discount_price,
+                                loyal_price,
+                                price_unit
+                            FROM catalog_product_snapshots
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_events AS cse
+                                WHERE cse.id = catalog_product_snapshots.id
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(text("DROP TABLE catalog_product_snapshots"))
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_product_snapshots__new RENAME TO catalog_product_snapshots"
+                        )
+                    )
+                elif dialect == "mysql":
+                    for idx in inspector.get_indexes("catalog_product_snapshots"):
+                        idx_name = idx.get("name")
+                        idx_columns = idx.get("column_names") or []
+                        if not idx_name:
+                            continue
+                        if any(column_name in set(unexpected_price_columns) for column_name in idx_columns):
+                            connection.execute(text(f"DROP INDEX `{idx_name}` ON `catalog_product_snapshots`"))
+
+                    for uq in inspector.get_unique_constraints("catalog_product_snapshots"):
+                        uq_name = uq.get("name")
+                        uq_columns = uq.get("column_names") or []
+                        if not uq_name:
+                            continue
+                        if any(column_name in set(unexpected_price_columns) for column_name in uq_columns):
+                            connection.execute(text(f"ALTER TABLE `catalog_product_snapshots` DROP INDEX `{uq_name}`"))
+
+                    for column_name in sorted(unexpected_price_columns):
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE `catalog_product_snapshots` DROP COLUMN `{column_name}`"
+                            )
+                        )
+
+                    connection.execute(
+                        text(
+                            """
+                            DELETE cps
+                            FROM catalog_product_snapshots AS cps
+                            LEFT JOIN catalog_snapshot_events AS cse
+                                ON cse.id = cps.id
+                            WHERE cse.id IS NULL
+                            """
+                        )
+                    )
+
+                    inspector_after_drop = inspect(self._engine)
+                    has_price_fk_after_drop = self._table_has_fk(
+                        inspector_after_drop,
+                        table_name="catalog_product_snapshots",
+                        constrained_columns=("id",),
+                        referred_table="catalog_snapshot_events",
+                        referred_columns=("id",),
+                    )
+                    if not has_price_fk_after_drop:
+                        connection.execute(
+                            text(
+                                """
+                                ALTER TABLE catalog_product_snapshots
+                                ADD CONSTRAINT fk_cps_event
+                                FOREIGN KEY (id)
+                                REFERENCES catalog_snapshot_events (id)
+                                ON DELETE CASCADE
+                                """
+                            )
+                        )
+                else:
+                    raise RuntimeError(f"Unsupported dialect for snapshot price migration: {dialect}")
+            LOGGER.info("Catalog snapshot schema migrated: normalized catalog_product_snapshots")
+
+        inspector = inspect(self._engine)
+        if inspector.has_table("catalog_snapshot_assets"):
+            with self._engine.begin() as connection:
+                if dialect == "mysql":
+                    connection.execute(text("DROP TABLE `catalog_snapshot_assets`"))
+                elif dialect == "sqlite":
+                    connection.execute(text("DROP TABLE catalog_snapshot_assets"))
+                else:
+                    raise RuntimeError(
+                        f"Unsupported dialect for snapshot contract migration: {dialect}"
+                    )
+            LOGGER.info("Catalog snapshot schema migrated: dropped table catalog_snapshot_assets")
+
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_snapshot_available_counts"):
+            return
+
+        available_columns = {
+            item["name"] for item in inspector.get_columns("catalog_snapshot_available_counts")
+        }
+        unexpected_available_columns = [
+            name for name in available_columns if name not in set(self._SNAPSHOT_AVAILABLE_COLUMNS)
+        ]
+        has_available_fk = self._table_has_fk(
+            inspector,
+            table_name="catalog_snapshot_available_counts",
+            constrained_columns=("snapshot_id",),
+            referred_table="catalog_snapshot_events",
+            referred_columns=("id",),
+        )
+
+        if unexpected_available_columns or not has_available_fk:
+            with self._engine.begin() as connection:
+                if dialect == "sqlite":
+                    has_created_at = "created_at" in available_columns
+                    created_expr = "COALESCE(created_at, CURRENT_TIMESTAMP)" if has_created_at else "CURRENT_TIMESTAMP"
+                    connection.execute(text("DROP TABLE IF EXISTS catalog_snapshot_available_counts__new"))
+                    connection.execute(
+                        text(
+                            """
+                            CREATE TABLE catalog_snapshot_available_counts__new (
+                                snapshot_id INTEGER NOT NULL PRIMARY KEY,
+                                available_count FLOAT NULL,
+                                created_at DATETIME NOT NULL,
+                                FOREIGN KEY(snapshot_id) REFERENCES catalog_snapshot_events(id) ON DELETE CASCADE
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO catalog_snapshot_available_counts__new (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                snapshot_id,
+                                available_count,
+                                {created_expr}
+                            FROM catalog_snapshot_available_counts
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_events AS cse
+                                WHERE cse.id = catalog_snapshot_available_counts.snapshot_id
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(text("DROP TABLE catalog_snapshot_available_counts"))
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_snapshot_available_counts__new RENAME TO catalog_snapshot_available_counts"
+                        )
+                    )
+                elif dialect == "mysql":
+                    if "created_at" not in available_columns:
+                        connection.execute(
+                            text(
+                                "ALTER TABLE catalog_snapshot_available_counts "
+                                "ADD COLUMN created_at DATETIME(6) NULL"
+                            )
+                        )
+                    connection.execute(
+                        text(
+                            "UPDATE catalog_snapshot_available_counts "
+                            "SET created_at = COALESCE(created_at, UTC_TIMESTAMP(6))"
+                        )
+                    )
+                    for column_name in sorted(unexpected_available_columns):
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE `catalog_snapshot_available_counts` DROP COLUMN `{column_name}`"
+                            )
+                        )
+                    connection.execute(
+                        text(
+                            """
+                            DELETE csac
+                            FROM catalog_snapshot_available_counts AS csac
+                            LEFT JOIN catalog_snapshot_events AS cse
+                                ON cse.id = csac.snapshot_id
+                            WHERE cse.id IS NULL
+                            """
+                        )
+                    )
+                    inspector_after = inspect(self._engine)
+                    has_available_fk_after = self._table_has_fk(
+                        inspector_after,
+                        table_name="catalog_snapshot_available_counts",
+                        constrained_columns=("snapshot_id",),
+                        referred_table="catalog_snapshot_events",
+                        referred_columns=("id",),
+                    )
+                    if not has_available_fk_after:
+                        connection.execute(
+                            text(
+                                """
+                                ALTER TABLE catalog_snapshot_available_counts
+                                ADD CONSTRAINT fk_csac_event
+                                FOREIGN KEY (snapshot_id)
+                                REFERENCES catalog_snapshot_events (id)
+                                ON DELETE CASCADE
+                                """
+                            )
+                        )
+                else:
+                    raise RuntimeError(f"Unsupported dialect for available_count snapshot migration: {dialect}")
+            LOGGER.info("Catalog snapshot schema migrated: normalized catalog_snapshot_available_counts")
+
+    def _ensure_snapshot_interval_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_snapshot_events"):
+            return
+
+        event_columns = {item["name"] for item in inspector.get_columns("catalog_snapshot_events")}
         missing_columns = [
             column_name
             for column_name in ("content_fingerprint", "valid_from_at", "valid_to_at")
-            if column_name not in snapshot_columns
+            if column_name not in event_columns
         ]
         if not missing_columns:
             return
@@ -114,35 +633,143 @@ class _CatalogSchemaMigrationMixin:
                 if dialect == "mysql":
                     if column_name == "content_fingerprint":
                         ddl = (
-                            "ALTER TABLE catalog_product_snapshots "
+                            "ALTER TABLE catalog_snapshot_events "
                             "ADD COLUMN content_fingerprint VARCHAR(64) NULL"
                         )
                     else:
                         ddl = (
-                            f"ALTER TABLE catalog_product_snapshots "
+                            "ALTER TABLE catalog_snapshot_events "
                             f"ADD COLUMN {column_name} DATETIME(6) NULL"
                         )
                 elif dialect == "sqlite":
                     if column_name == "content_fingerprint":
                         ddl = (
-                            "ALTER TABLE catalog_product_snapshots "
+                            "ALTER TABLE catalog_snapshot_events "
                             "ADD COLUMN content_fingerprint VARCHAR(64)"
                         )
                     else:
                         ddl = (
-                            f"ALTER TABLE catalog_product_snapshots "
+                            "ALTER TABLE catalog_snapshot_events "
                             f"ADD COLUMN {column_name} DATETIME"
                         )
                 else:
                     raise RuntimeError(
-                        f"Unsupported dialect for snapshot schema migration: {dialect}"
+                        f"Unsupported dialect for snapshot event schema migration: {dialect}"
                     )
                 connection.execute(text(ddl))
 
         LOGGER.info(
-            "Catalog snapshot schema migrated: added_columns=%s",
+            "Catalog snapshot event schema migrated: added_columns=%s",
             ",".join(missing_columns),
         )
+
+    def _ensure_snapshot_available_counts_schema(self) -> None:
+        inspector = inspect(self._engine)
+        if not inspector.has_table("catalog_product_snapshots"):
+            return
+        if not inspector.has_table("catalog_snapshot_available_counts"):
+            return
+
+        available_columns = {
+            item["name"] for item in inspector.get_columns("catalog_snapshot_available_counts")
+        }
+        snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
+        dialect = self._engine.dialect.name
+
+        with self._engine.begin() as connection:
+            if "created_at" not in available_columns:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_snapshot_available_counts "
+                            "ADD COLUMN created_at DATETIME(6) NULL"
+                        )
+                    )
+                elif dialect == "sqlite":
+                    connection.execute(
+                        text(
+                            "ALTER TABLE catalog_snapshot_available_counts "
+                            "ADD COLUMN created_at DATETIME"
+                        )
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Unsupported dialect for available_count snapshot migration: {dialect}"
+                    )
+
+            if "available_count" in snapshot_columns:
+                if dialect == "mysql":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_available_counts (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.available_count,
+                                COALESCE(cps.created_at, cps.observed_at, UTC_TIMESTAMP(6))
+                            FROM catalog_product_snapshots AS cps
+                            INNER JOIN catalog_snapshot_events AS cse
+                                ON cse.id = cps.id
+                            LEFT JOIN catalog_snapshot_available_counts AS csac
+                                ON csac.snapshot_id = cps.id
+                            WHERE csac.snapshot_id IS NULL
+                            """
+                        )
+                    )
+                elif dialect == "sqlite":
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO catalog_snapshot_available_counts (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                cps.id,
+                                cps.available_count,
+                                COALESCE(cps.created_at, cps.observed_at, CURRENT_TIMESTAMP)
+                            FROM catalog_product_snapshots AS cps
+                            WHERE EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_events AS cse
+                                WHERE cse.id = cps.id
+                            )
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM catalog_snapshot_available_counts AS csac
+                                WHERE csac.snapshot_id = cps.id
+                            )
+                            """
+                        )
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Unsupported dialect for available_count snapshot migration: {dialect}"
+                    )
+
+            if dialect == "mysql":
+                connection.execute(
+                    text(
+                        "UPDATE catalog_snapshot_available_counts "
+                        "SET created_at = COALESCE(created_at, UTC_TIMESTAMP(6))"
+                    )
+                )
+            elif dialect == "sqlite":
+                connection.execute(
+                    text(
+                        "UPDATE catalog_snapshot_available_counts "
+                        "SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"
+                    )
+                )
+            else:
+                raise RuntimeError(f"Unsupported dialect for available_count snapshot migration: {dialect}")
+
+        LOGGER.info("Catalog snapshot schema migrated: backfilled available_count snapshots")
 
     def _ensure_product_sources_schema(self) -> None:
         inspector = inspect(self._engine)
@@ -178,58 +805,58 @@ class _CatalogSchemaMigrationMixin:
 
     def _ensure_snapshot_event_schema(self) -> None:
         inspector = inspect(self._engine)
-        if not inspector.has_table("catalog_product_snapshots"):
+        if not inspector.has_table("catalog_snapshot_events"):
             return
 
-        columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
-        if "source_event_uid" not in columns:
+        event_columns = {item["name"] for item in inspector.get_columns("catalog_snapshot_events")}
+        if "source_event_uid" not in event_columns:
             dialect = self._engine.dialect.name
             with self._engine.begin() as connection:
                 if dialect == "mysql":
                     ddl = (
-                        "ALTER TABLE catalog_product_snapshots "
+                        "ALTER TABLE catalog_snapshot_events "
                         "ADD COLUMN source_event_uid VARCHAR(191) NULL"
                     )
                 else:
                     ddl = (
-                        "ALTER TABLE catalog_product_snapshots "
+                        "ALTER TABLE catalog_snapshot_events "
                         "ADD COLUMN source_event_uid VARCHAR(191)"
                     )
                 connection.execute(text(ddl))
-            LOGGER.info("Catalog snapshots schema migrated: added source_event_uid")
+            LOGGER.info("Catalog snapshot events schema migrated: added source_event_uid")
 
-        indexes = {idx.get("name") for idx in inspector.get_indexes("catalog_product_snapshots")}
-        if "idx_cps_latest" not in indexes:
+        indexes = {idx.get("name") for idx in inspector.get_indexes("catalog_snapshot_events")}
+        if "idx_cse_latest" not in indexes:
             with self._engine.begin() as connection:
                 connection.execute(
                     text(
-                        "CREATE INDEX idx_cps_latest ON catalog_product_snapshots (parser_name, source_id, id)"
+                        "CREATE INDEX idx_cse_latest ON catalog_snapshot_events (parser_name, source_id, id)"
                     )
                 )
-            LOGGER.info("Catalog snapshots schema migrated: added idx_cps_latest")
+            LOGGER.info("Catalog snapshot events schema migrated: added idx_cse_latest")
 
         unique_constraints = {
             item.get("name")
-            for item in inspector.get_unique_constraints("catalog_product_snapshots")
+            for item in inspector.get_unique_constraints("catalog_snapshot_events")
         }
-        if "uq_cps_event" not in unique_constraints:
+        if "uq_cse_event" not in unique_constraints:
             dialect = self._engine.dialect.name
             with self._engine.begin() as connection:
                 if dialect == "mysql":
                     connection.execute(
                         text(
-                            "ALTER TABLE catalog_product_snapshots "
-                            "ADD CONSTRAINT uq_cps_event UNIQUE (source_event_uid)"
+                            "ALTER TABLE catalog_snapshot_events "
+                            "ADD CONSTRAINT uq_cse_event UNIQUE (source_event_uid)"
                         )
                     )
                 else:
                     connection.execute(
                         text(
-                            "CREATE UNIQUE INDEX uq_cps_event "
-                            "ON catalog_product_snapshots (source_event_uid)"
+                            "CREATE UNIQUE INDEX uq_cse_event "
+                            "ON catalog_snapshot_events (source_event_uid)"
                         )
                     )
-            LOGGER.info("Catalog snapshots schema migrated: added uq_cps_event")
+            LOGGER.info("Catalog snapshot events schema migrated: added uq_cse_event")
 
     def _ensure_catalog_products_constraints(self) -> None:
         inspector = inspect(self._engine)

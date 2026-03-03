@@ -113,6 +113,20 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
                 }
+                snapshot_event_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_snapshot_events)").fetchall()
+                }
+                snapshot_available_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_snapshot_available_counts)").fetchall()
+                }
+                snapshot_price_fk = conn.execute(
+                    "PRAGMA foreign_key_list(catalog_product_snapshots)"
+                ).fetchall()
+                snapshot_available_fk = conn.execute(
+                    "PRAGMA foreign_key_list(catalog_snapshot_available_counts)"
+                ).fetchall()
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
@@ -125,16 +139,58 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("duplicate_image_urls_json", product_columns)
                 self.assertNotIn("image_fingerprints_json", product_columns)
 
-                self.assertIn("title_original", snapshot_columns)
-                self.assertIn("title_normalized_no_stopwords", snapshot_columns)
                 self.assertIn("price", snapshot_columns)
-                self.assertIn("composition_original", snapshot_columns)
+                self.assertIn("discount_price", snapshot_columns)
+                self.assertIn("loyal_price", snapshot_columns)
+                self.assertIn("price_unit", snapshot_columns)
+                self.assertNotIn("canonical_product_id", snapshot_columns)
+                self.assertNotIn("parser_name", snapshot_columns)
+                self.assertNotIn("source_id", snapshot_columns)
+                self.assertNotIn("content_fingerprint", snapshot_columns)
+                self.assertNotIn("valid_from_at", snapshot_columns)
+                self.assertNotIn("valid_to_at", snapshot_columns)
+                self.assertNotIn("title_original", snapshot_columns)
+                self.assertNotIn("title_normalized_no_stopwords", snapshot_columns)
+                self.assertNotIn("description", snapshot_columns)
+                self.assertNotIn("composition_original", snapshot_columns)
+                self.assertNotIn("available_count", snapshot_columns)
+                self.assertNotIn("package_quantity", snapshot_columns)
+                self.assertNotIn("package_unit", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
                 self.assertNotIn("title_original_no_stopwords", snapshot_columns)
                 self.assertNotIn("source_payload_json", snapshot_columns)
                 self.assertNotIn("image_urls_json", snapshot_columns)
                 self.assertNotIn("duplicate_image_urls_json", snapshot_columns)
                 self.assertNotIn("image_fingerprints_json", snapshot_columns)
+                self.assertIn("id", snapshot_event_columns)
+                self.assertIn("canonical_product_id", snapshot_event_columns)
+                self.assertIn("parser_name", snapshot_event_columns)
+                self.assertIn("source_id", snapshot_event_columns)
+                self.assertIn("source_event_uid", snapshot_event_columns)
+                self.assertIn("content_fingerprint", snapshot_event_columns)
+                self.assertIn("valid_from_at", snapshot_event_columns)
+                self.assertIn("valid_to_at", snapshot_event_columns)
+                self.assertIn("snapshot_id", snapshot_available_columns)
+                self.assertIn("available_count", snapshot_available_columns)
+                self.assertIn("created_at", snapshot_available_columns)
+                self.assertNotIn("valid_from_at", snapshot_available_columns)
+                self.assertNotIn("valid_to_at", snapshot_available_columns)
+                self.assertTrue(
+                    any(
+                        str(row["table"]) == "catalog_snapshot_events"
+                        and str(row["from"]) == "id"
+                        and str(row["to"]) == "id"
+                        for row in snapshot_price_fk
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        str(row["table"]) == "catalog_snapshot_events"
+                        and str(row["from"]) == "snapshot_id"
+                        and str(row["to"]) == "id"
+                        for row in snapshot_available_fk
+                    )
+                )
 
                 tables = {
                     str(row["name"])
@@ -143,8 +199,171 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ).fetchall()
                 }
                 self.assertIn("catalog_product_assets", tables)
-                self.assertIn("catalog_snapshot_assets", tables)
+                self.assertIn("catalog_snapshot_events", tables)
+                self.assertIn("catalog_snapshot_available_counts", tables)
+                self.assertNotIn("catalog_snapshot_assets", tables)
                 self.assertNotIn("catalog_product_payload_nodes", tables)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_migration_prunes_legacy_snapshot_schema(self) -> None:
+        db_path = self._make_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE catalog_product_snapshots (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        canonical_product_id VARCHAR(36) NOT NULL,
+                        parser_name VARCHAR(64) NOT NULL,
+                        source_id VARCHAR(255) NOT NULL,
+                        source_run_id VARCHAR(64),
+                        receiver_product_id INTEGER,
+                        receiver_artifact_id INTEGER,
+                        receiver_sort_order INTEGER,
+                        price REAL,
+                        discount_price REAL,
+                        loyal_price REAL,
+                        price_unit VARCHAR(32),
+                        source_event_uid VARCHAR(191),
+                        content_fingerprint VARCHAR(64),
+                        valid_from_at DATETIME,
+                        valid_to_at DATETIME,
+                        observed_at DATETIME NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        available_count REAL,
+                        title_original TEXT,
+                        composition_original TEXT,
+                        settlement_id INTEGER
+                    );
+                    CREATE INDEX idx_legacy_settlement ON catalog_product_snapshots (settlement_id);
+                    CREATE TABLE catalog_snapshot_assets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        asset_kind VARCHAR(32) NOT NULL,
+                        sort_order INTEGER NOT NULL,
+                        value TEXT NOT NULL,
+                        created_at DATETIME NOT NULL
+                    );
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO catalog_product_snapshots (
+                        id,
+                        canonical_product_id,
+                        parser_name,
+                        source_id,
+                        price,
+                        discount_price,
+                        loyal_price,
+                        price_unit,
+                        valid_from_at,
+                        valid_to_at,
+                        observed_at,
+                        created_at,
+                        available_count,
+                        title_original,
+                        composition_original,
+                        settlement_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        1,
+                        "canon-1",
+                        "fixprice",
+                        "receiver:legacy:1",
+                        99.9,
+                        79.9,
+                        69.9,
+                        "RUB",
+                        "2026-02-28T10:00:00+00:00",
+                        "2026-02-28T10:00:00+00:00",
+                        "2026-02-28T10:00:00+00:00",
+                        "2026-02-28T10:00:00+00:00",
+                        7.0,
+                        "Legacy title",
+                        "Legacy composition",
+                        42,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            CatalogSQLiteRepository(db_path)
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                snapshot_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
+                }
+                self.assertNotIn("available_count", snapshot_columns)
+                self.assertNotIn("title_original", snapshot_columns)
+                self.assertNotIn("composition_original", snapshot_columns)
+                self.assertNotIn("settlement_id", snapshot_columns)
+
+                legacy_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_assets'"
+                ).fetchone()
+                self.assertIsNone(legacy_table)
+
+                available_row = conn.execute(
+                    """
+                    SELECT available_count, created_at
+                    FROM catalog_snapshot_available_counts
+                    WHERE snapshot_id = ?
+                    """,
+                    (1,),
+                ).fetchone()
+                self.assertIsNotNone(available_row)
+                assert available_row is not None
+                self.assertAlmostEqual(float(available_row["available_count"]), 7.0, places=3)
+                self.assertIn("2026-02-28", str(available_row["created_at"]))
+
+                event_row = conn.execute(
+                    """
+                    SELECT valid_from_at, valid_to_at
+                    FROM catalog_snapshot_events
+                    WHERE id = ?
+                    """,
+                    (1,),
+                ).fetchone()
+                self.assertIsNotNone(event_row)
+                assert event_row is not None
+                self.assertIn("2026-02-28", str(event_row["valid_from_at"]))
+                self.assertIn("10:00:00", str(event_row["valid_from_at"]))
+                self.assertIn("2026-02-28", str(event_row["valid_to_at"]))
+                self.assertIn("10:00:00", str(event_row["valid_to_at"]))
+
+                snapshot_price_fk = conn.execute(
+                    "PRAGMA foreign_key_list(catalog_product_snapshots)"
+                ).fetchall()
+                self.assertTrue(
+                    any(
+                        str(row["table"]) == "catalog_snapshot_events"
+                        and str(row["from"]) == "id"
+                        and str(row["to"]) == "id"
+                        for row in snapshot_price_fk
+                    )
+                )
+                snapshot_available_fk = conn.execute(
+                    "PRAGMA foreign_key_list(catalog_snapshot_available_counts)"
+                ).fetchall()
+                self.assertTrue(
+                    any(
+                        str(row["table"]) == "catalog_snapshot_events"
+                        and str(row["from"]) == "snapshot_id"
+                        and str(row["to"]) == "id"
+                        for row in snapshot_available_fk
+                    )
+                )
             finally:
                 conn.close()
         finally:
@@ -221,9 +440,11 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
                 snapshot = conn.execute(
                     """
-                    SELECT id, price, discount_price, loyal_price, price_unit, description
-                    FROM catalog_product_snapshots
-                    WHERE parser_name = ? AND source_id = ?
+                    SELECT cps.id, cps.price, cps.discount_price, cps.loyal_price, cps.price_unit,
+                           cse.valid_from_at, cse.valid_to_at
+                    FROM catalog_product_snapshots AS cps
+                    JOIN catalog_snapshot_events AS cse ON cse.id = cps.id
+                    WHERE cse.parser_name = ? AND cse.source_id = ?
                     """,
                     ("fixprice", "receiver:run-price:1"),
                 ).fetchone()
@@ -233,7 +454,20 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(snapshot["discount_price"]), 149.9, places=3)
                 self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
                 self.assertEqual(snapshot["price_unit"], "RUB")
-                self.assertEqual(snapshot["description"], "Тестовое описание")
+                available = conn.execute(
+                    """
+                    SELECT available_count, created_at
+                    FROM catalog_snapshot_available_counts
+                    WHERE snapshot_id = ?
+                    """,
+                    (int(snapshot["id"]),),
+                ).fetchone()
+                self.assertIsNotNone(available)
+                assert available is not None
+                self.assertAlmostEqual(float(available["available_count"]), 1.0, places=3)
+                self.assertIn("2026-02-28", str(available["created_at"]))
+                self.assertIn("2026-02-28", str(snapshot["valid_from_at"]))
+                self.assertIn("2026-02-28", str(snapshot["valid_to_at"]))
                 snapshot_payload_table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_payload_nodes'"
                 ).fetchone()
@@ -700,7 +934,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 snapshots = conn.execute(
                     """
                     SELECT id, content_fingerprint, valid_from_at, valid_to_at
-                    FROM catalog_product_snapshots
+                    FROM catalog_snapshot_events
                     WHERE parser_name = ? AND source_id = ?
                     ORDER BY id ASC
                     """,
@@ -710,6 +944,96 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(snapshots[0]["content_fingerprint"])
                 self.assertIn("2026-02-28 10:00:00", str(snapshots[0]["valid_from_at"]))
                 self.assertIn("2026-02-28 11:00:00", str(snapshots[0]["valid_to_at"]))
+                available_rows = conn.execute(
+                    """
+                    SELECT available_count, created_at
+                    FROM catalog_snapshot_available_counts
+                    WHERE snapshot_id = ?
+                    """,
+                    (int(snapshots[0]["id"]),),
+                ).fetchall()
+                self.assertEqual(len(available_rows), 1)
+                self.assertAlmostEqual(float(available_rows[0]["available_count"]), 10.0, places=3)
+                self.assertIn("2026-02-28", str(available_rows[0]["created_at"]))
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_updates_projection_when_only_nonvolatile_fields_change(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Сыр плавленый",
+                title_normalized="сыр плавленый",
+                title_original_no_stopwords="сыр плавленый",
+                title_normalized_no_stopwords="сыр плавленый",
+                brand="Brand-1",
+                description="Описание 1",
+                unit="PCE",
+                available_count=5.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-nonvolatile:1",
+                sku="nonvolatile-1",
+                price=129.9,
+                discount_price=119.9,
+                loyal_price=109.9,
+                price_unit="RUB",
+                observed_at=datetime(2026, 2, 28, 12, 0, tzinfo=timezone.utc),
+            )
+            second = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Сыр плавленый",
+                title_normalized="сыр плавленый",
+                title_original_no_stopwords="сыр плавленый",
+                title_normalized_no_stopwords="сыр плавленый",
+                brand="Brand-2",
+                description="Описание 2",
+                unit="PCE",
+                available_count=5.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-nonvolatile:1",
+                sku="nonvolatile-1",
+                price=129.9,
+                discount_price=119.9,
+                loyal_price=109.9,
+                price_unit="RUB",
+                observed_at=datetime(2026, 2, 28, 13, 0, tzinfo=timezone.utc),
+            )
+
+            repo.upsert_many([first])
+            repo.upsert_many([second])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                snapshots = conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM catalog_snapshot_events
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-nonvolatile:1"),
+                ).fetchone()
+                assert snapshots is not None
+                self.assertEqual(int(snapshots["cnt"]), 1)
+
+                product = conn.execute(
+                    """
+                    SELECT brand, description
+                    FROM catalog_products
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-nonvolatile:1"),
+                ).fetchone()
+                self.assertIsNotNone(product)
+                assert product is not None
+                self.assertEqual(product["brand"], "Brand-2")
+                self.assertEqual(product["description"], "Описание 2")
             finally:
                 conn.close()
         finally:

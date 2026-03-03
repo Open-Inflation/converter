@@ -37,10 +37,11 @@ from .catalog_schema import (
     _CatalogProductAsset,
     _CatalogProductCategoryLink,
     _CatalogProductSnapshot,
+    _CatalogSnapshotEvent,
+    _CatalogSnapshotAvailableCount,
     _CatalogProductSource,
     _CatalogSettlement,
     _CatalogSettlementGeodata,
-    _CatalogSnapshotAsset,
     _CatalogStorageDeleteOutbox,
     _ConverterSyncState,
     _as_float,
@@ -101,6 +102,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self._ensure_snapshot_interval_schema()
         self._ensure_product_sources_schema()
         self._ensure_snapshot_event_schema()
+        self._ensure_snapshot_available_counts_schema()
+        self._enforce_snapshot_contract_schema()
         self._ensure_catalog_products_constraints()
         self._validate_catalog_products_schema()
         LOGGER.info(
@@ -197,6 +200,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     record,
                     snapshot_fingerprint=snapshot_fingerprint,
                 )
+                settlement = self._upsert_settlement(session, record, payload=payload)
+                categories = self._upsert_categories(session, record, payload=payload)
+
                 if touched_snapshot:
                     counters["reused_snapshots"] += 1
                     self._update_source_fingerprint_in_session(
@@ -204,33 +210,29 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                         record=record,
                         snapshot_fingerprint=snapshot_fingerprint,
                     )
-                    continue
-
-                settlement = self._upsert_settlement(session, record, payload=payload)
-                snapshot, inserted = self._insert_product_snapshot(
-                    session,
-                    record,
-                    settlement=settlement,
-                    payload=payload,
-                    snapshot_fingerprint=snapshot_fingerprint,
-                    source_event_uid=source_event_uid,
-                )
-                if inserted:
-                    counters["inserted_snapshots"] += 1
+                else:
+                    snapshot, inserted = self._insert_product_snapshot(
+                        session,
+                        record,
+                        payload=payload,
+                        snapshot_fingerprint=snapshot_fingerprint,
+                        source_event_uid=source_event_uid,
+                    )
+                    if inserted:
+                        counters["inserted_snapshots"] += 1
+                    self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
+                    self._upsert_product_source(
+                        session,
+                        record,
+                        snapshot=snapshot,
+                        snapshot_fingerprint=snapshot_fingerprint,
+                    )
 
                 self._append_settlement_geodata(
                     session,
                     settlement=settlement,
                     record=record,
                     payload=payload,
-                )
-                categories = self._upsert_categories(session, record, payload=payload)
-                self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
-                self._upsert_product_source(
-                    session,
-                    record,
-                    snapshot=snapshot,
-                    snapshot_fingerprint=snapshot_fingerprint,
                 )
                 self._upsert_product_row(
                     session,
@@ -478,33 +480,35 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 record,
                 snapshot_fingerprint=snapshot_fingerprint,
             )
-            if touched_snapshot:
-                continue
 
             settlement = self._upsert_settlement(session, record, payload=payload)
-            snapshot, _ = self._insert_product_snapshot(
-                session,
-                record,
-                settlement=settlement,
-                payload=payload,
-                snapshot_fingerprint=snapshot_fingerprint,
-                source_event_uid=source_event_uid,
-            )
+            categories = self._upsert_categories(session, record, payload=payload)
+            if touched_snapshot:
+                self._update_source_fingerprint_in_session(
+                    session,
+                    record=record,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                )
+            else:
+                snapshot, _ = self._insert_product_snapshot(
+                    session,
+                    record,
+                    payload=payload,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                    source_event_uid=source_event_uid,
+                )
+                self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
+                self._upsert_product_source(
+                    session,
+                    record,
+                    snapshot=snapshot,
+                    snapshot_fingerprint=snapshot_fingerprint,
+                )
             self._append_settlement_geodata(
                 session,
                 settlement=settlement,
                 record=record,
                 payload=payload,
-            )
-
-            categories = self._upsert_categories(session, record, payload=payload)
-            self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
-
-            self._upsert_product_source(
-                session,
-                record,
-                snapshot=snapshot,
-                snapshot_fingerprint=snapshot_fingerprint,
             )
             self._upsert_product_row(
                 session,
@@ -682,38 +686,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         fingerprint_input = {
             "parser_name": record.parser_name.strip().lower(),
             "source_id": source_id,
-            "title_original": record.title_original,
-            "title_normalized_no_stopwords": record.title_normalized_no_stopwords,
-            "brand": record.brand,
-            "source_page_url": record.source_page_url,
-            "description": record.description,
-            "producer_name": record.producer_name,
-            "producer_country": record.producer_country,
-            "expiration_date_in_days": record.expiration_date_in_days,
-            "rating": record.rating,
-            "reviews_count": record.reviews_count,
             "price": record.price,
             "discount_price": record.discount_price,
             "loyal_price": record.loyal_price,
             "price_unit": record.price_unit,
-            "adult": record.adult,
-            "is_new": record.is_new,
-            "promo": record.promo,
-            "season": record.season,
-            "hit": record.hit,
-            "data_matrix": record.data_matrix,
-            "unit": record.unit,
             "available_count": record.available_count,
-            "package_quantity": record.package_quantity,
-            "package_unit": record.package_unit,
-            "category_normalized": record.category_normalized,
-            "geo_normalized": record.geo_normalized,
-            "composition_original": record.composition_original,
-            "composition_normalized": record.composition_normalized,
-            "image_urls": list(record.image_urls),
-            "image_fingerprints": list(record.image_fingerprints),
-            "categories": self._extract_category_candidates(record, payload=payload),
-            "geo_components": self._extract_geo_components(record, payload=payload),
         }
         encoded = json.dumps(
             self._to_json_safe(fingerprint_input),
@@ -774,23 +751,30 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if latest_source_fingerprint is not None and latest_source_fingerprint != snapshot_fingerprint:
             return False
 
-        snapshot = session.get(_CatalogProductSnapshot, int(source.latest_snapshot_id))
-        if snapshot is None:
+        snapshot_event = session.get(_CatalogSnapshotEvent, int(source.latest_snapshot_id))
+        if snapshot_event is None:
             return False
 
-        existing_fingerprint = _safe_str(snapshot.content_fingerprint)
+        existing_fingerprint = _safe_str(snapshot_event.content_fingerprint)
         if existing_fingerprint is None or existing_fingerprint != snapshot_fingerprint:
             return False
 
         observed_at = self._to_utc(record.observed_at)
         now = _utc_now()
 
-        if snapshot.valid_from_at is None:
-            snapshot.valid_from_at = snapshot.observed_at
-        if snapshot.valid_to_at is None:
-            snapshot.valid_to_at = snapshot.observed_at
-        snapshot.valid_to_at = self._max_datetime(snapshot.valid_to_at, observed_at)
-        snapshot.observed_at = self._max_datetime(snapshot.observed_at, observed_at)
+        if snapshot_event.valid_from_at is None:
+            snapshot_event.valid_from_at = snapshot_event.observed_at
+        if snapshot_event.valid_to_at is None:
+            snapshot_event.valid_to_at = snapshot_event.observed_at
+        snapshot_event.valid_to_at = self._max_datetime(snapshot_event.valid_to_at, observed_at)
+        snapshot_event.observed_at = self._max_datetime(snapshot_event.observed_at, observed_at)
+        if snapshot_event.id is not None:
+            self._upsert_snapshot_available_count(
+                session,
+                snapshot_id=int(snapshot_event.id),
+                available_count=record.available_count,
+                created_at=observed_at,
+            )
 
         if _safe_str(source.canonical_product_id):
             record.canonical_product_id = source.canonical_product_id
@@ -814,9 +798,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             "Catalog snapshot reused: parser=%s source_id=%s snapshot_id=%s valid_from_at=%s valid_to_at=%s",
             record.parser_name,
             source_id,
-            snapshot.id,
-            snapshot.valid_from_at,
-            snapshot.valid_to_at,
+            snapshot_event.id,
+            snapshot_event.valid_from_at,
+            snapshot_event.valid_to_at,
         )
         return True
 
@@ -1060,13 +1044,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if not missing_fields:
             return
 
-        history = session.scalars(
-            select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.canonical_product_id == canonical_product_id)
+        product_history = session.scalars(
+            select(_CatalogProduct).where(_CatalogProduct.canonical_product_id == canonical_product_id)
         ).all()
-        if not history:
-            history = session.scalars(
-                select(_CatalogProduct).where(_CatalogProduct.canonical_product_id == canonical_product_id)
-            ).all()
+        history = [*product_history]
         if not history:
             return
 
@@ -1113,27 +1094,41 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         session: Session,
         record: NormalizedProductRecord,
         *,
-        settlement: _CatalogSettlement | None,
         payload: dict[str, Any],
         snapshot_fingerprint: str,
         source_event_uid: str | None,
-    ) -> tuple[_CatalogProductSnapshot, bool]:
+    ) -> tuple[_CatalogSnapshotEvent, bool]:
         now = _utc_now()
         observed_at = self._to_utc(record.observed_at)
         event_uid = _safe_str(source_event_uid)
 
         if event_uid is not None:
             existing = session.scalar(
-                select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.source_event_uid == event_uid)
+                select(_CatalogSnapshotEvent).where(_CatalogSnapshotEvent.source_event_uid == event_uid)
             )
             if existing is not None:
                 if existing.valid_to_at is None:
                     existing.valid_to_at = existing.observed_at
                 existing.valid_to_at = self._max_datetime(existing.valid_to_at, observed_at)
                 existing.observed_at = self._max_datetime(existing.observed_at, observed_at)
+                if existing.id is not None:
+                    self._upsert_price_snapshot(
+                        session,
+                        snapshot_id=int(existing.id),
+                        price=record.price,
+                        discount_price=record.discount_price,
+                        loyal_price=record.loyal_price,
+                        price_unit=record.price_unit,
+                    )
+                    self._upsert_snapshot_available_count(
+                        session,
+                        snapshot_id=int(existing.id),
+                        available_count=record.available_count,
+                        created_at=observed_at,
+                    )
                 return existing, False
 
-        snapshot = _CatalogProductSnapshot(
+        snapshot = _CatalogSnapshotEvent(
             canonical_product_id=record.canonical_product_id or str(uuid4()),
             parser_name=record.parser_name,
             source_id=self._source_id(record),
@@ -1141,35 +1136,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             receiver_product_id=self._to_int(payload.get("receiver_product_id")),
             receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
             receiver_sort_order=self._to_int(payload.get("receiver_sort_order")),
-            title_original=record.title_original,
-            title_normalized_no_stopwords=record.title_normalized_no_stopwords,
-            brand=record.brand,
-            source_page_url=record.source_page_url,
-            description=record.description,
-            producer_name=record.producer_name,
-            producer_country=record.producer_country,
-            expiration_date_in_days=record.expiration_date_in_days,
-            rating=record.rating,
-            reviews_count=record.reviews_count,
-            price=record.price,
-            discount_price=record.discount_price,
-            loyal_price=record.loyal_price,
-            price_unit=record.price_unit,
-            adult=record.adult,
-            is_new=record.is_new,
-            promo=record.promo,
-            season=record.season,
-            hit=record.hit,
-            data_matrix=record.data_matrix,
-            unit=record.unit,
-            available_count=record.available_count,
-            package_quantity=record.package_quantity,
-            package_unit=record.package_unit,
-            category_normalized=record.category_normalized,
-            geo_normalized=record.geo_normalized,
-            composition_original=record.composition_original,
-            composition_normalized=record.composition_normalized,
-            settlement_id=settlement.id if settlement is not None else None,
             source_event_uid=event_uid,
             content_fingerprint=snapshot_fingerprint,
             valid_from_at=observed_at,
@@ -1180,7 +1146,20 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         session.add(snapshot)
         session.flush([snapshot])
         if snapshot.id is not None:
-            self._insert_snapshot_assets(session, int(snapshot.id), record, now=now)
+            self._upsert_price_snapshot(
+                session,
+                snapshot_id=int(snapshot.id),
+                price=record.price,
+                discount_price=record.discount_price,
+                loyal_price=record.loyal_price,
+                price_unit=record.price_unit,
+            )
+            self._upsert_snapshot_available_count(
+                session,
+                snapshot_id=int(snapshot.id),
+                available_count=record.available_count,
+                created_at=observed_at,
+            )
         return snapshot, True
 
     def _upsert_product_source(
@@ -1188,7 +1167,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         session: Session,
         record: NormalizedProductRecord,
         *,
-        snapshot: _CatalogProductSnapshot,
+        snapshot: _CatalogSnapshotEvent,
         snapshot_fingerprint: str | None = None,
     ) -> None:
         parser_name = record.parser_name.strip().lower()
@@ -1440,7 +1419,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self,
         session: Session,
         *,
-        snapshot: _CatalogProductSnapshot,
+        snapshot: _CatalogSnapshotEvent,
         categories: list[tuple[_CatalogCategory, int]],
     ) -> None:
         if snapshot.id is None or not categories:
@@ -1806,29 +1785,52 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             session.execute(insert(_CatalogProductAsset), rows)
         LOGGER.debug("Catalog product assets replaced: product_id=%s rows=%s", product_id, len(rows))
 
-    def _insert_snapshot_assets(
+    def _upsert_price_snapshot(
         self,
         session: Session,
         snapshot_id: int,
-        record: NormalizedProductRecord,
         *,
-        now: datetime,
+        price: float | None,
+        discount_price: float | None,
+        loyal_price: float | None,
+        price_unit: str | None,
     ) -> None:
-        rows: list[dict[str, Any]] = []
-        for asset_kind, values in self._iter_asset_values(record):
-            for idx, value in enumerate(values):
-                rows.append(
-                    {
-                        "snapshot_id": int(snapshot_id),
-                        "asset_kind": asset_kind,
-                        "sort_order": idx,
-                        "value": str(value),
-                        "created_at": now,
-                    }
+        row = session.get(_CatalogProductSnapshot, int(snapshot_id))
+        if row is None:
+            session.add(
+                _CatalogProductSnapshot(
+                    id=int(snapshot_id),
+                    price=price,
+                    discount_price=discount_price,
+                    loyal_price=loyal_price,
+                    price_unit=price_unit,
                 )
-        if rows:
-            session.execute(insert(_CatalogSnapshotAsset), rows)
-        LOGGER.debug("Catalog snapshot assets inserted: snapshot_id=%s rows=%s", snapshot_id, len(rows))
+            )
+            return
+        row.price = price
+        row.discount_price = discount_price
+        row.loyal_price = loyal_price
+        row.price_unit = price_unit
+
+    def _upsert_snapshot_available_count(
+        self,
+        session: Session,
+        snapshot_id: int,
+        *,
+        available_count: float | None,
+        created_at: datetime,
+    ) -> None:
+        row = session.get(_CatalogSnapshotAvailableCount, int(snapshot_id))
+        if row is None:
+            session.add(
+                _CatalogSnapshotAvailableCount(
+                    snapshot_id=int(snapshot_id),
+                    available_count=available_count,
+                    created_at=created_at,
+                )
+            )
+            return
+        row.available_count = available_count
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:
