@@ -20,6 +20,7 @@ from .receiver_mapping import (
     map_receiver_row_to_raw_product,
 )
 from .receiver_schema import (
+    _ReceiverBase,
     _RunArtifact,
     _RunArtifactAdministrativeUnit,
     _RunArtifactCategory,

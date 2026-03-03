@@ -8,7 +8,7 @@ from .adapters import (
     is_mysql_dsn,
 )
 from .core.registry import HandlerRegistry
-from .daemon import ConverterDaemon, QueueJob
+from .daemon import ConverterDaemon, PollingJob
 from .parsers import register_builtin_handlers
 from .pipeline import ConverterPipeline
 from .sync import ConverterSyncService, SyncBatchEvent, SyncJob, SyncOutcome
@@ -26,7 +26,7 @@ __all__ = [
     "ConverterDaemon",
     "ConverterPipeline",
     "ConverterSyncService",
-    "QueueJob",
+    "PollingJob",
     "ReceiverMySQLRepository",
     "ReceiverSQLiteRepository",
     "SyncBatchEvent",

@@ -37,7 +37,7 @@ converter/
       handler.py     # обработчик Перекрёсток
       title_parser.py
   sync.py            # сервис batch-sync receiver -> catalog
-  daemon.py          # очередь + HTTP trigger API
+  daemon.py          # polling daemon (receiver -> catalog)
   pipeline.py        # title/category/geo/composition normalization
 ```
 
@@ -151,14 +151,12 @@ python3 sync_receiver_to_catalog.py \
 
 Удаление выполняется только для URL текущего storage origin и путей `/images/<name>`.
 
-### Демон + очередь + trigger
+### Демон (polling)
 
-Запуск daemon-процесса (очередь задач + HTTP API):
+Запуск daemon-процесса в режиме циклического опроса `receiver`:
 
 ```bash
 python3 converter_daemon.py \
-  --host 127.0.0.1 \
-  --port 8090 \
   --receiver-db ../receiver/data/receiver.db \
   --catalog-db ./data/catalog.db \
   --parser-name fixprice \
@@ -166,42 +164,11 @@ python3 converter_daemon.py \
   --write-chunk-size 1000 \
   --sync-version v2 \
   --writer-mode mysql_v2 \
-  --max-queue-size 100
-```
-
-HTTP точки:
-
-- `GET /health` — состояние воркера и очереди.
-- `POST /trigger` — поставить sync-задачу в очередь.
-
-Пример trigger-запроса:
-
-```bash
-curl -X POST http://127.0.0.1:8090/trigger \
-  -H 'Content-Type: application/json' \
-  -d '{"parser_name":"fixprice","run_id":"<receiver-run-id>","source":"receiver","receiver_fetch_size":2000,"write_chunk_size":1000,"sync_version":"v2","writer_mode":"mysql_v2"}'
+  --poll-interval-sec 5
 ```
 
 `write_chunk_size` задаёт атомарный размер `apply_chunk`.
-Legacy-поля payload (`batch_size`, `txn_chunk_size`) не поддерживаются.
-
-Дедупликация очереди выполняется по ключу `(receiver_db, catalog_db, parser_name)`:
-пока задача с тем же ключом в pending/active, повторный trigger не создаст дубль.
-
-### Автотриггер из receiver
-
-В `receiver` добавлен post-run hook: при `status=success` он отправляет trigger в converter daemon.
-
-Переменные окружения `receiver`:
-
-- `CONVERTER_TRIGGER_URL` — например `http://127.0.0.1:8090/trigger`.
-- `CONVERTER_TRIGGER_TOKEN` — bearer token (если у daemon задан `--auth-token`).
-- `CONVERTER_TRIGGER_TIMEOUT_SEC` — timeout запроса (по умолчанию `3`).
-- `CONVERTER_TRIGGER_RECEIVER_DB` — опционально переопределяет `receiver_db` в payload.
-- `CONVERTER_TRIGGER_CATALOG_DB` — опционально переопределяет `catalog_db` в payload.
-- `CONVERTER_TRIGGER_RECEIVER_FETCH_SIZE` — опционально переопределяет `receiver_fetch_size`.
-- `CONVERTER_TRIGGER_WRITE_CHUNK_SIZE` — опционально переопределяет `write_chunk_size`.
-- `CONVERTER_TRIGGER_MAX_BATCHES` — опционально ограничивает число batch-ов за один trigger.
+Демон не использует HTTP trigger и самостоятельно подхватывает новые записи по cursor.
 
 ## Как расширять
 
