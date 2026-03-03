@@ -121,12 +121,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_snapshot_available_counts)").fetchall()
                 }
-                snapshot_price_fk = conn.execute(
-                    "PRAGMA foreign_key_list(catalog_product_snapshots)"
-                ).fetchall()
-                snapshot_available_fk = conn.execute(
-                    "PRAGMA foreign_key_list(catalog_snapshot_available_counts)"
-                ).fetchall()
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
@@ -175,22 +169,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("created_at", snapshot_available_columns)
                 self.assertNotIn("valid_from_at", snapshot_available_columns)
                 self.assertNotIn("valid_to_at", snapshot_available_columns)
-                self.assertTrue(
-                    any(
-                        str(row["table"]) == "catalog_snapshot_events"
-                        and str(row["from"]) == "id"
-                        and str(row["to"]) == "id"
-                        for row in snapshot_price_fk
-                    )
-                )
-                self.assertTrue(
-                    any(
-                        str(row["table"]) == "catalog_snapshot_events"
-                        and str(row["from"]) == "snapshot_id"
-                        and str(row["to"]) == "id"
-                        for row in snapshot_available_fk
-                    )
-                )
 
                 tables = {
                     str(row["name"])
@@ -295,6 +273,8 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             finally:
                 conn.close()
 
+            repo = CatalogSQLiteRepository(db_path, validate_schema=False)
+            repo.migrate_schema()
             CatalogSQLiteRepository(db_path)
 
             conn = sqlite3.connect(db_path)

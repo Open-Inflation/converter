@@ -4,6 +4,7 @@ import logging
 import os
 
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import OperationalError
 
 from converter.core.ports import StorageRepository
 
@@ -148,27 +149,30 @@ class _CatalogSchemaMigrationMixin:
                 f"({', '.join(sorted(unexpected_available_columns))}). Run one-way migration."
             )
 
-        if not self._table_has_fk(
+        has_price_fk = self._table_has_fk(
             inspector,
             table_name="catalog_product_snapshots",
             constrained_columns=("id",),
             referred_table="catalog_snapshot_events",
             referred_columns=("id",),
-        ):
-            raise RuntimeError(
-                "Schema mismatch in `catalog_product_snapshots`: missing FK id -> catalog_snapshot_events.id. "
-                "Run one-way migration."
+        )
+        if not has_price_fk:
+            LOGGER.debug(
+                "Catalog schema validation: FK catalog_product_snapshots.id -> "
+                "catalog_snapshot_events.id is not enforced"
             )
-        if not self._table_has_fk(
+
+        has_available_fk = self._table_has_fk(
             inspector,
             table_name="catalog_snapshot_available_counts",
             constrained_columns=("snapshot_id",),
             referred_table="catalog_snapshot_events",
             referred_columns=("id",),
-        ):
-            raise RuntimeError(
-                "Schema mismatch in `catalog_snapshot_available_counts`: missing FK snapshot_id -> "
-                "catalog_snapshot_events.id. Run one-way migration."
+        )
+        if not has_available_fk:
+            LOGGER.debug(
+                "Catalog schema validation: FK catalog_snapshot_available_counts.snapshot_id -> "
+                "catalog_snapshot_events.id is not enforced"
             )
 
         if inspector.has_table("catalog_snapshot_assets"):
@@ -200,6 +204,19 @@ class _CatalogSchemaMigrationMixin:
                 continue
             return True
         return False
+
+    @staticmethod
+    def _is_mysql_references_denied_error(exc: OperationalError) -> bool:
+        orig = getattr(exc, "orig", None)
+        code: int | None = None
+        args = getattr(orig, "args", None)
+        if isinstance(args, tuple) and args:
+            try:
+                code = int(args[0])
+            except (TypeError, ValueError):
+                code = None
+        message = str(orig or exc).lower()
+        return code == 1142 and "references command denied" in message
 
     def _enforce_snapshot_contract_schema(self) -> None:
         inspector = inspect(self._engine)
@@ -467,17 +484,27 @@ class _CatalogSchemaMigrationMixin:
                         referred_columns=("id",),
                     )
                     if not has_price_fk_after_drop:
-                        connection.execute(
-                            text(
-                                """
-                                ALTER TABLE catalog_product_snapshots
-                                ADD CONSTRAINT fk_cps_event
-                                FOREIGN KEY (id)
-                                REFERENCES catalog_snapshot_events (id)
-                                ON DELETE CASCADE
-                                """
+                        try:
+                            connection.execute(
+                                text(
+                                    """
+                                    ALTER TABLE catalog_product_snapshots
+                                    ADD CONSTRAINT fk_cps_event
+                                    FOREIGN KEY (id)
+                                    REFERENCES catalog_snapshot_events (id)
+                                    ON DELETE CASCADE
+                                    """
+                                )
                             )
-                        )
+                        except OperationalError as exc:
+                            if self._is_mysql_references_denied_error(exc):
+                                setattr(self, "_snapshot_fk_supported", False)
+                                LOGGER.warning(
+                                    "Catalog snapshot schema migrated without FK fk_cps_event: "
+                                    "MySQL user lacks REFERENCES privilege"
+                                )
+                            else:
+                                raise
                 else:
                     raise RuntimeError(f"Unsupported dialect for snapshot price migration: {dialect}")
             LOGGER.info("Catalog snapshot schema migrated: normalized catalog_product_snapshots")
@@ -598,17 +625,27 @@ class _CatalogSchemaMigrationMixin:
                         referred_columns=("id",),
                     )
                     if not has_available_fk_after:
-                        connection.execute(
-                            text(
-                                """
-                                ALTER TABLE catalog_snapshot_available_counts
-                                ADD CONSTRAINT fk_csac_event
-                                FOREIGN KEY (snapshot_id)
-                                REFERENCES catalog_snapshot_events (id)
-                                ON DELETE CASCADE
-                                """
+                        try:
+                            connection.execute(
+                                text(
+                                    """
+                                    ALTER TABLE catalog_snapshot_available_counts
+                                    ADD CONSTRAINT fk_csac_event
+                                    FOREIGN KEY (snapshot_id)
+                                    REFERENCES catalog_snapshot_events (id)
+                                    ON DELETE CASCADE
+                                    """
+                                )
                             )
-                        )
+                        except OperationalError as exc:
+                            if self._is_mysql_references_denied_error(exc):
+                                setattr(self, "_snapshot_fk_supported", False)
+                                LOGGER.warning(
+                                    "Catalog snapshot schema migrated without FK fk_csac_event: "
+                                    "MySQL user lacks REFERENCES privilege"
+                                )
+                            else:
+                                raise
                 else:
                     raise RuntimeError(f"Unsupported dialect for available_count snapshot migration: {dialect}")
             LOGGER.info("Catalog snapshot schema migrated: normalized catalog_snapshot_available_counts")

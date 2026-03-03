@@ -84,6 +84,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         *,
         engine: Engine | None = None,
         storage_repository: StorageRepository | None = None,
+        validate_schema: bool = True,
     ) -> None:
         self._database_url = database_url
         self._engine = engine or self._create_engine(database_url)
@@ -98,7 +99,17 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             storage_repository or self._build_storage_repository_from_env()
         )
         self._category_text_normalizer = RussianTextNormalizer()
+        self._snapshot_fk_supported = True
         _CatalogBase.metadata.create_all(self._engine)
+        if validate_schema:
+            self._validate_catalog_products_schema()
+        LOGGER.info(
+            "Catalog repository initialized: dialect=%s storage_delete_enabled=%s",
+            self._engine.dialect.name,
+            self._storage_repository is not None,
+        )
+
+    def migrate_schema(self) -> None:
         self._ensure_snapshot_interval_schema()
         self._ensure_product_sources_schema()
         self._ensure_snapshot_event_schema()
@@ -106,11 +117,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self._enforce_snapshot_contract_schema()
         self._ensure_catalog_products_constraints()
         self._validate_catalog_products_schema()
-        LOGGER.info(
-            "Catalog repository initialized: dialect=%s storage_delete_enabled=%s",
-            self._engine.dialect.name,
-            self._storage_repository is not None,
-        )
+        LOGGER.info("Catalog schema migration completed: dialect=%s", self._engine.dialect.name)
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
@@ -1930,6 +1937,7 @@ class CatalogSQLiteRepository(CatalogRepository):
         db_path: str | Path,
         *,
         storage_repository: StorageRepository | None = None,
+        validate_schema: bool = True,
     ) -> None:
         path = Path(db_path)
         if path.parent and not path.parent.exists():
@@ -1937,4 +1945,5 @@ class CatalogSQLiteRepository(CatalogRepository):
         super().__init__(
             f"sqlite:///{path.resolve()}",
             storage_repository=storage_repository,
+            validate_schema=validate_schema,
         )

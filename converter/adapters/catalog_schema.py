@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
-    ForeignKey,
     Float,
     Integer,
     String,
@@ -146,11 +145,7 @@ class _CatalogSnapshotEvent(_CatalogBase):
 class _CatalogProductSnapshot(_CatalogBase):
     __tablename__ = "catalog_product_snapshots"
 
-    id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("catalog_snapshot_events.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     discount_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     loyal_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -160,11 +155,7 @@ class _CatalogProductSnapshot(_CatalogBase):
 class _CatalogSnapshotAvailableCount(_CatalogBase):
     __tablename__ = "catalog_snapshot_available_counts"
 
-    snapshot_id: Mapped[int] = mapped_column(
-        Integer,
-        ForeignKey("catalog_snapshot_events.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    snapshot_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     available_count: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

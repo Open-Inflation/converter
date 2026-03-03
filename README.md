@@ -63,6 +63,14 @@ converter/
 Converter сохраняет расширенный product-контракт в `catalog_products` (current projection),
 а snapshot-историю ведет через `catalog_snapshot_events` + отдельные value-таблицы (цены и `available_count`).
 Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-поля и таблицу `catalog_snapshot_assets`.
+Автоматической миграции в `CatalogRepository` больше нет: запуск migration выполняется вручную отдельной командой.
+
+Ручной запуск миграции:
+
+```bash
+python3 migrate_catalog_schema.py --catalog-db ./data/catalog.db
+python3 migrate_catalog_schema.py --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog?charset=utf8mb4'
+```
 
 Политика обновления:
 
