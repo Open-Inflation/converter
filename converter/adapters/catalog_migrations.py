@@ -440,50 +440,68 @@ class _CatalogSchemaMigrationMixin:
                         )
                     )
                 elif dialect == "mysql":
-                    for idx in inspector.get_indexes("catalog_product_snapshots"):
-                        idx_name = idx.get("name")
-                        idx_columns = idx.get("column_names") or []
-                        if not idx_name:
-                            continue
-                        if any(column_name in set(unexpected_price_columns) for column_name in idx_columns):
-                            connection.execute(text(f"DROP INDEX `{idx_name}` ON `catalog_product_snapshots`"))
+                    price_expr = "cps.price" if "price" in price_columns else "NULL"
+                    discount_price_expr = "cps.discount_price" if "discount_price" in price_columns else "NULL"
+                    loyal_price_expr = "cps.loyal_price" if "loyal_price" in price_columns else "NULL"
+                    price_unit_expr = "cps.price_unit" if "price_unit" in price_columns else "NULL"
 
-                    for uq in inspector.get_unique_constraints("catalog_product_snapshots"):
-                        uq_name = uq.get("name")
-                        uq_columns = uq.get("column_names") or []
-                        if not uq_name:
-                            continue
-                        if any(column_name in set(unexpected_price_columns) for column_name in uq_columns):
-                            connection.execute(text(f"ALTER TABLE `catalog_product_snapshots` DROP INDEX `{uq_name}`"))
-
-                    for column_name in sorted(unexpected_price_columns):
-                        connection.execute(
-                            text(
-                                f"ALTER TABLE `catalog_product_snapshots` DROP COLUMN `{column_name}`"
-                            )
-                        )
-
+                    connection.execute(text("DROP TABLE IF EXISTS `catalog_product_snapshots__new`"))
                     connection.execute(
                         text(
                             """
-                            DELETE cps
-                            FROM catalog_product_snapshots AS cps
-                            LEFT JOIN catalog_snapshot_events AS cse
-                                ON cse.id = cps.id
-                            WHERE cse.id IS NULL
+                            CREATE TABLE `catalog_product_snapshots__new` (
+                                id INTEGER NOT NULL PRIMARY KEY,
+                                price FLOAT NULL,
+                                discount_price FLOAT NULL,
+                                loyal_price FLOAT NULL,
+                                price_unit VARCHAR(32) NULL
+                            )
                             """
                         )
                     )
+                    connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO catalog_product_snapshots__new (
+                                id,
+                                price,
+                                discount_price,
+                                loyal_price,
+                                price_unit
+                            )
+                            SELECT
+                                cps.id,
+                                {price_expr},
+                                {discount_price_expr},
+                                {loyal_price_expr},
+                                {price_unit_expr}
+                            FROM catalog_product_snapshots AS cps
+                            INNER JOIN catalog_snapshot_events AS cse
+                                ON cse.id = cps.id
+                            """
+                        )
+                    )
+                    connection.execute(text("DROP TABLE IF EXISTS `catalog_product_snapshots__old`"))
+                    connection.execute(
+                        text(
+                            """
+                            RENAME TABLE
+                                catalog_product_snapshots TO catalog_product_snapshots__old,
+                                catalog_product_snapshots__new TO catalog_product_snapshots
+                            """
+                        )
+                    )
+                    connection.execute(text("DROP TABLE `catalog_product_snapshots__old`"))
 
-                    inspector_after_drop = inspect(self._engine)
-                    has_price_fk_after_drop = self._table_has_fk(
-                        inspector_after_drop,
+                    inspector_after_rebuild = inspect(self._engine)
+                    has_price_fk_after_rebuild = self._table_has_fk(
+                        inspector_after_rebuild,
                         table_name="catalog_product_snapshots",
                         constrained_columns=("id",),
                         referred_table="catalog_snapshot_events",
                         referred_columns=("id",),
                     )
-                    if not has_price_fk_after_drop:
+                    if not has_price_fk_after_rebuild:
                         try:
                             connection.execute(
                                 text(
@@ -586,39 +604,60 @@ class _CatalogSchemaMigrationMixin:
                         )
                     )
                 elif dialect == "mysql":
-                    if "created_at" not in available_columns:
-                        connection.execute(
-                            text(
-                                "ALTER TABLE catalog_snapshot_available_counts "
-                                "ADD COLUMN created_at DATETIME(6) NULL"
-                            )
-                        )
-                    connection.execute(
-                        text(
-                            "UPDATE catalog_snapshot_available_counts "
-                            "SET created_at = COALESCE(created_at, UTC_TIMESTAMP(6))"
-                        )
+                    available_count_expr = (
+                        "csac.available_count" if "available_count" in available_columns else "NULL"
                     )
-                    for column_name in sorted(unexpected_available_columns):
-                        connection.execute(
-                            text(
-                                f"ALTER TABLE `catalog_snapshot_available_counts` DROP COLUMN `{column_name}`"
-                            )
-                        )
+                    created_at_expr = (
+                        "COALESCE(csac.created_at, UTC_TIMESTAMP(6))"
+                        if "created_at" in available_columns
+                        else "UTC_TIMESTAMP(6)"
+                    )
+
+                    connection.execute(text("DROP TABLE IF EXISTS `catalog_snapshot_available_counts__new`"))
                     connection.execute(
                         text(
                             """
-                            DELETE csac
+                            CREATE TABLE `catalog_snapshot_available_counts__new` (
+                                snapshot_id INTEGER NOT NULL PRIMARY KEY,
+                                available_count FLOAT NULL,
+                                created_at DATETIME(6) NOT NULL
+                            )
+                            """
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO catalog_snapshot_available_counts__new (
+                                snapshot_id,
+                                available_count,
+                                created_at
+                            )
+                            SELECT
+                                csac.snapshot_id,
+                                {available_count_expr},
+                                {created_at_expr}
                             FROM catalog_snapshot_available_counts AS csac
-                            LEFT JOIN catalog_snapshot_events AS cse
+                            INNER JOIN catalog_snapshot_events AS cse
                                 ON cse.id = csac.snapshot_id
-                            WHERE cse.id IS NULL
                             """
                         )
                     )
-                    inspector_after = inspect(self._engine)
+                    connection.execute(text("DROP TABLE IF EXISTS `catalog_snapshot_available_counts__old`"))
+                    connection.execute(
+                        text(
+                            """
+                            RENAME TABLE
+                                catalog_snapshot_available_counts TO catalog_snapshot_available_counts__old,
+                                catalog_snapshot_available_counts__new TO catalog_snapshot_available_counts
+                            """
+                        )
+                    )
+                    connection.execute(text("DROP TABLE `catalog_snapshot_available_counts__old`"))
+
+                    inspector_after_rebuild = inspect(self._engine)
                     has_available_fk_after = self._table_has_fk(
-                        inspector_after,
+                        inspector_after_rebuild,
                         table_name="catalog_snapshot_available_counts",
                         constrained_columns=("snapshot_id",),
                         referred_table="catalog_snapshot_events",

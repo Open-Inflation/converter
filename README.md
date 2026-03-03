@@ -68,8 +68,14 @@ Legacy snapshot-схема не поддерживается: миграция o
 Ручной запуск миграции:
 
 ```bash
-python3 migrate_catalog_schema.py --catalog-db ./data/catalog.db
-python3 migrate_catalog_schema.py --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog?charset=utf8mb4'
+.venv/bin/python migrate_catalog_schema.py --catalog-db ./data/catalog.db --log-level INFO
+.venv/bin/python migrate_catalog_schema.py --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog?charset=utf8mb4' --log-level INFO
+```
+
+Ручной SQL-вариант для MySQL:
+
+```bash
+mysql -u user -p -D catalog < sql/migrations/20260303_snapshot_events_mysql.sql
 ```
 
 Политика обновления:

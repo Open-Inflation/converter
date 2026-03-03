@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 from converter.adapters.catalog import CatalogRepository
@@ -34,11 +35,23 @@ def main() -> None:
         required=True,
         help="SQLite path or MySQL DSN (mysql://... or mysql+pymysql://...).",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="Logging level for migration output (default: INFO).",
+    )
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    print("Starting catalog schema migration...", flush=True)
     repo = CatalogRepository(_database_url(args.catalog_db), validate_schema=False)
     repo.migrate_schema()
-    print("Catalog schema migration completed")
+    print("Catalog schema migration completed", flush=True)
 
 
 if __name__ == "__main__":
