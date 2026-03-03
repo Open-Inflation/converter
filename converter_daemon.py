@@ -31,24 +31,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
-    args = _build_parser().parse_args()
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
-    )
-
-    parser_cycle = None
-    initial_parser = args.parser_name
-
-    if args.parser_name == "all":
-        parser_cycle = cycle(AVAILABLE_PARSERS)
-        initial_parser = next(parser_cycle)
-
-    job = PollingJob(
+def build_job(args, parser_name: str) -> PollingJob:
+    return PollingJob(
         receiver_db=args.receiver_db,
         catalog_db=args.catalog_db,
-        parser_name=initial_parser,
+        parser_name=parser_name,
         receiver_fetch_size=max(1, int(args.receiver_fetch_size)),
         write_chunk_size=max(1, int(args.write_chunk_size)),
         sync_version=args.sync_version,
@@ -56,33 +43,49 @@ def main() -> None:
         max_batches=max(0, int(args.max_batches)),
     )
 
+
+def main() -> None:
+    args = _build_parser().parse_args()
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
+    )
+
     poll_interval = max(0.1, float(args.poll_interval_sec))
 
-    daemon = ConverterDaemon(
-        job=job,
-        poll_interval_sec=poll_interval,
-    )
-    daemon.start()
+    if args.parser_name == "all":
+        parser_cycle = cycle(AVAILABLE_PARSERS)
+    else:
+        parser_cycle = cycle((args.parser_name,))
 
-    LOGGER.info(
-        "Converter daemon started: parser=%s poll_interval_sec=%.2f",
-        job.parser_name,
-        poll_interval,
-    )
+    daemon: ConverterDaemon | None = None
 
     try:
         while True:
+            parser_name = next(parser_cycle)
+
+            if daemon is not None:
+                daemon.stop()
+
+            job = build_job(args, parser_name)
+            daemon = ConverterDaemon(job=job, poll_interval_sec=poll_interval)
+            daemon.start()
+
+            LOGGER.info(
+                "Converter daemon started with parser=%s poll_interval_sec=%.2f",
+                parser_name,
+                poll_interval,
+            )
+
             sleep(poll_interval)
 
-            if parser_cycle is not None:
-                job.parser_name = next(parser_cycle)
-                LOGGER.info("Switched parser to: %s", job.parser_name)
     except KeyboardInterrupt:
         LOGGER.info("Converter daemon interrupted by keyboard signal")
     finally:
-        LOGGER.info("Converter daemon shutting down")
-        daemon.stop()
-        LOGGER.info("Converter daemon stopped")
+        if daemon is not None:
+            LOGGER.info("Converter daemon shutting down")
+            daemon.stop()
+            LOGGER.info("Converter daemon stopped")
 
 
 if __name__ == "__main__":
