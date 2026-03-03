@@ -87,7 +87,7 @@ class ConverterDaemon:
                 self._job.max_batches,
             )
 
-    def stop(self, *, timeout: float = 10.0) -> None:
+    def stop(self, *, timeout: float = (60 * 60 * 2)) -> None:
         LOGGER.info("Converter daemon stop requested: timeout_sec=%.2f", max(0.1, float(timeout)))
         self._stop_event.set()
 
