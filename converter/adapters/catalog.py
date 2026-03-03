@@ -1239,7 +1239,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
         observed_at = self._to_utc(record.observed_at)
         now = _utc_now()
-        row = self._get_settlement_row(session, key)
+        settlement_cache = session.info.setdefault("_catalog_settlement_cache", {})
+        if isinstance(settlement_cache, dict) and key in settlement_cache:
+            cached = settlement_cache[key]
+            row = cached if isinstance(cached, _CatalogSettlement) else None
+        else:
+            row = self._get_settlement_row(session, key)
+            if isinstance(settlement_cache, dict):
+                settlement_cache[key] = row
 
         if row is None:
             row = _CatalogSettlement(
@@ -1260,6 +1267,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             )
             session.add(row)
             session.flush([row])
+            if isinstance(settlement_cache, dict):
+                settlement_cache[key] = row
             LOGGER.debug(
                 "Catalog settlement created: parser=%s source_id=%s settlement_id=%s geo_key=%s",
                 record.parser_name,
@@ -1353,6 +1362,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         parser_name = record.parser_name.strip().lower()
         observed_at = self._to_utc(record.observed_at)
         now = _utc_now()
+        category_cache = session.info.setdefault("_catalog_category_cache", {})
 
         out: list[tuple[_CatalogCategory, int]] = []
         for idx, item in enumerate(candidates):
@@ -1368,7 +1378,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             if category_key is None:
                 continue
 
-            row = self._get_category_row(session, category_key)
+            if isinstance(category_cache, dict) and category_key in category_cache:
+                cached = category_cache[category_key]
+                row = cached if isinstance(cached, _CatalogCategory) else None
+            else:
+                row = self._get_category_row(session, category_key)
+                if isinstance(category_cache, dict):
+                    category_cache[category_key] = row
             if row is None:
                 row = _CatalogCategory(
                     category_key=category_key,
@@ -1385,6 +1401,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     updated_at=now,
                 )
                 session.add(row)
+                if isinstance(category_cache, dict):
+                    category_cache[category_key] = row
             else:
                 row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
                 row.updated_at = now
@@ -1428,7 +1446,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if snapshot.id is None or not categories:
             return
 
-        session.flush()
+        if any(category.id is None for category, _ in categories):
+            session.flush()
 
         seen: set[int] = set()
         now = _utc_now()
@@ -1653,7 +1672,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             )
             session.add(existing)
             session.flush([existing])
-            if existing.id is not None:
+            if existing.id is not None and self._has_any_assets(record):
                 self._replace_product_assets(session, int(existing.id), record, now=now)
             LOGGER.debug(
                 "Catalog product created: parser=%s source_id=%s product_id=%s canonical_product_id=%s",
@@ -1751,6 +1770,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             ("duplicate_image_url", list(record.duplicate_image_urls)),
             ("image_fingerprint", list(record.image_fingerprints)),
         ]
+
+    @staticmethod
+    def _has_any_assets(record: NormalizedProductRecord) -> bool:
+        for _, values in CatalogRepository._iter_asset_values(record):
+            if values:
+                return True
+        return False
 
     def _replace_product_assets(
         self,
