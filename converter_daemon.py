@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import logging
 from time import sleep
+from itertools import cycle
 
 from converter.daemon import ConverterDaemon, PollingJob
 
 
 LOGGER = logging.getLogger(__name__)
+
+AVAILABLE_PARSERS = ("fixprice", "chizhik", "perekrestok")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -15,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--receiver-db", required=True, help="Receiver DB path or DSN")
     parser.add_argument("--catalog-db", required=True, help="Catalog DB path or DSN")
-    parser.add_argument("--parser-name", default="fixprice", help="Parser name")
+    parser.add_argument("--parser-name", default="all", help="Parser name")
 
     parser.add_argument("--receiver-fetch-size", type=int, default=2000, help="Receiver fetch size")
     parser.add_argument("--write-chunk-size", type=int, default=1000, help="Atomic write chunk size")
@@ -35,34 +38,45 @@ def main() -> None:
         format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
     )
 
+    parser_cycle = None
+    initial_parser = args.parser_name
+
+    if args.parser_name == "all":
+        parser_cycle = cycle(AVAILABLE_PARSERS)
+        initial_parser = next(parser_cycle)
+
     job = PollingJob(
         receiver_db=args.receiver_db,
         catalog_db=args.catalog_db,
-        parser_name=args.parser_name,
+        parser_name=initial_parser,
         receiver_fetch_size=max(1, int(args.receiver_fetch_size)),
         write_chunk_size=max(1, int(args.write_chunk_size)),
         sync_version=args.sync_version,
         writer_mode=args.writer_mode,
         max_batches=max(0, int(args.max_batches)),
     )
+
+    poll_interval = max(0.1, float(args.poll_interval_sec))
+
     daemon = ConverterDaemon(
         job=job,
-        poll_interval_sec=max(0.1, float(args.poll_interval_sec)),
+        poll_interval_sec=poll_interval,
     )
     daemon.start()
 
     LOGGER.info(
-        "Converter daemon started: parser=%s poll_interval_sec=%.2f receiver_fetch_size=%s write_chunk_size=%s max_batches=%s",
+        "Converter daemon started: parser=%s poll_interval_sec=%.2f",
         job.parser_name,
-        max(0.1, float(args.poll_interval_sec)),
-        job.receiver_fetch_size,
-        job.write_chunk_size,
-        job.max_batches,
+        poll_interval,
     )
 
     try:
         while True:
-            sleep(1.0)
+            sleep(poll_interval)
+
+            if parser_cycle is not None:
+                job.parser_name = next(parser_cycle)
+                LOGGER.info("Switched parser to: %s", job.parser_name)
     except KeyboardInterrupt:
         LOGGER.info("Converter daemon interrupted by keyboard signal")
     finally:
