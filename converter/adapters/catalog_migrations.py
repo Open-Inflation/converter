@@ -209,8 +209,10 @@ class _CatalogSchemaMigrationMixin:
             ("catalog_identity_map", "canonical_product_id", ("UUID",)),
             ("catalog_storage_delete_outbox", "status", ("ENUM",)),
             ("catalog_product_assets", "asset_kind", ("ENUM",)),
-            ("catalog_settlements", "geo_point", ("GEOGRAPHY", "USER-DEFINED")),
-            ("catalog_settlement_geodata", "geo_point", ("GEOGRAPHY", "USER-DEFINED")),
+            # SQLAlchemy often introspects PostGIS geography columns as NullType (token "NULL")
+            # without extra type plugins, so we treat it as acceptable here.
+            ("catalog_settlements", "geo_point", ("GEOGRAPHY", "USER-DEFINED", "NULL")),
+            ("catalog_settlement_geodata", "geo_point", ("GEOGRAPHY", "USER-DEFINED", "NULL")),
         )
         problems: list[str] = []
         for table_name, column_name, expected_tokens in checks:
