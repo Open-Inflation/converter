@@ -88,7 +88,7 @@ class _CatalogSchemaMigrationMixin:
         if not inspector.has_table("catalog_product_snapshots"):
             raise RuntimeError(
                 "Schema mismatch: missing table `catalog_product_snapshots`. "
-                "Run SQL migration `sql/migrations/20260303_snapshot_events_mysql.sql`."
+                "Run the current PostgreSQL schema migration."
             )
         snapshot_columns = {item["name"] for item in inspector.get_columns("catalog_product_snapshots")}
         missing_snapshot_columns = [name for name in self._SNAPSHOT_COLUMNS if name not in snapshot_columns]
@@ -122,6 +122,22 @@ class _CatalogSchemaMigrationMixin:
             raise RuntimeError(
                 "Schema mismatch: missing table `catalog_product_assets`. Use current schema."
             )
+
+        if inspector.has_table("catalog_settlements"):
+            settlement_columns = {item["name"] for item in inspector.get_columns("catalog_settlements")}
+            if "geo_point" not in settlement_columns:
+                raise RuntimeError(
+                    "Schema mismatch in `catalog_settlements`: missing column geo_point."
+                )
+        if inspector.has_table("catalog_settlement_geodata"):
+            geodata_columns = {item["name"] for item in inspector.get_columns("catalog_settlement_geodata")}
+            if "geo_point" not in geodata_columns:
+                raise RuntimeError(
+                    "Schema mismatch in `catalog_settlement_geodata`: missing column geo_point."
+                )
+
+        if self._engine.dialect.name == "postgresql":
+            self._ensure_postgresql_types(inspector=inspector)
 
         LOGGER.debug("Catalog schema validation passed")
 
@@ -184,3 +200,31 @@ class _CatalogSchemaMigrationMixin:
             timeout_seconds=timeout_seconds,
             fail_on_error=fail_on_error,
         )
+
+    @staticmethod
+    def _ensure_postgresql_types(*, inspector) -> None:
+        checks = (
+            ("catalog_products", "canonical_product_id", ("UUID",)),
+            ("catalog_product_sources", "canonical_product_id", ("UUID",)),
+            ("catalog_identity_map", "canonical_product_id", ("UUID",)),
+            ("catalog_storage_delete_outbox", "status", ("ENUM",)),
+            ("catalog_product_assets", "asset_kind", ("ENUM",)),
+            ("catalog_settlements", "geo_point", ("GEOGRAPHY", "USER-DEFINED")),
+            ("catalog_settlement_geodata", "geo_point", ("GEOGRAPHY", "USER-DEFINED")),
+        )
+        problems: list[str] = []
+        for table_name, column_name, expected_tokens in checks:
+            if not inspector.has_table(table_name):
+                continue
+            columns = {item["name"]: item for item in inspector.get_columns(table_name)}
+            info = columns.get(column_name)
+            if info is None:
+                continue
+            type_token = str(info.get("type") or "").upper()
+            if not any(expected in type_token for expected in expected_tokens):
+                problems.append(f"{table_name}.{column_name}={type_token or 'UNKNOWN'}")
+        if problems:
+            raise RuntimeError(
+                "Schema mismatch in PostgreSQL type mapping: "
+                f"{', '.join(problems)}"
+            )

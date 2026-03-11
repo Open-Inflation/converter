@@ -1,18 +1,18 @@
 from .catalog import CatalogSQLiteRepository
-from .catalog_mysql import CatalogMySQLRepository
-from .mysql_common import MySQLDsnError, is_mysql_dsn, parse_mysql_dsn
+from .catalog_postgres import CatalogPostgreSQLRepository
+from .postgres_common import PostgreSQLDsnError, is_postgres_dsn, parse_postgres_dsn
 from .receiver import ReceiverSQLiteRepository, map_receiver_row_to_raw_product
-from .receiver_mysql import ReceiverMySQLRepository
+from .receiver_postgres import ReceiverPostgreSQLRepository
 from .storage_http import StorageHTTPRepository
 
 __all__ = [
-    "CatalogMySQLRepository",
+    "CatalogPostgreSQLRepository",
     "CatalogSQLiteRepository",
-    "MySQLDsnError",
+    "PostgreSQLDsnError",
     "ReceiverSQLiteRepository",
-    "ReceiverMySQLRepository",
+    "ReceiverPostgreSQLRepository",
     "StorageHTTPRepository",
-    "is_mysql_dsn",
+    "is_postgres_dsn",
     "map_receiver_row_to_raw_product",
-    "parse_mysql_dsn",
+    "parse_postgres_dsn",
 ]

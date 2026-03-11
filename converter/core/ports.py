@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from typing import Protocol
+from collections.abc import Sequence
 
 from .models import ChunkApplyResultV2, RawProductRecord, SyncChunkV2
 
@@ -27,5 +28,8 @@ class CatalogWriteRepositoryV2(Protocol):
 
 
 class StorageRepository(Protocol):
+    def persist_images(self, urls: Sequence[str]) -> list[str]:
+        raise NotImplementedError
+
     def delete_images(self, urls: Sequence[str]) -> None:
         raise NotImplementedError

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +84,7 @@ class ReceiverRepository:
         after_product_id: int | None = None,
     ) -> list[RawProductRecord]:
         parser_filter = parser_name.strip().lower() if isinstance(parser_name, str) else None
-        watermark = self._normalize_watermark(after_ingested_at)
+        watermark = self._normalize_watermark(after_ingested_at, dialect=self._engine.dialect.name)
         after_id = int(after_product_id or 0)
 
         with self._session_factory() as session:
@@ -281,7 +281,7 @@ class ReceiverRepository:
 
     def _ensure_read_indexes(self) -> None:
         dialect = self._engine.dialect.name
-        if dialect not in {"mysql", "sqlite"}:
+        if dialect not in {"postgresql", "sqlite"}:
             return
 
         required_indexes = {
@@ -659,13 +659,30 @@ class ReceiverRepository:
         return out
 
     @staticmethod
-    def _normalize_watermark(value: str | datetime | None) -> str | datetime | None:
+    def _normalize_watermark(
+        value: str | datetime | None,
+        *,
+        dialect: str,
+    ) -> str | datetime | None:
         if value is None:
             return None
         if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
             return value
         token = _safe_str(value)
-        return token
+        if token is None:
+            return None
+        if dialect != "postgresql":
+            return token
+        token = token.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(token)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
 
 class ReceiverSQLiteRepository(ReceiverRepository):

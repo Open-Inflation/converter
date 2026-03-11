@@ -12,12 +12,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--receiver-db",
         required=True,
-        help="Receiver DB path (SQLite) or MySQL DSN",
+        help="Receiver DB path (SQLite, tests/local) or PostgreSQL DSN",
     )
     parser.add_argument(
         "--catalog-db",
         required=True,
-        help="Catalog DB path (SQLite) or MySQL DSN",
+        help="Catalog DB path (SQLite, tests/local) or PostgreSQL DSN",
     )
     parser.add_argument(
         "--parser-name",

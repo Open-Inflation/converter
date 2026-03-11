@@ -3,16 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
+    Enum,
     Float,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import UserDefinedType
 
 
 def _utc_now() -> datetime:
@@ -53,12 +59,54 @@ class _CatalogBase(DeclarativeBase):
     pass
 
 
+def _bigint_sqlite() -> BigInteger:
+    return BigInteger().with_variant(Integer(), "sqlite")
+
+
+def _uuid_text() -> String:
+    return String(36).with_variant(UUID(as_uuid=False), "postgresql")
+
+
+class _GeographyPointType(UserDefinedType):
+    cache_ok = True
+
+    def get_col_spec(self, **_kw: object) -> str:
+        return "TEXT"
+
+
+@compiles(_GeographyPointType, "postgresql")
+def _compile_geography_point_postgresql(_type, _compiler, **_kw: object) -> str:
+    return "GEOGRAPHY(POINT,4326)"
+
+
+@compiles(_GeographyPointType, "sqlite")
+def _compile_geography_point_sqlite(_type, _compiler, **_kw: object) -> str:
+    return "TEXT"
+
+
+_STORAGE_DELETE_STATUS_ENUM = Enum(
+    "pending",
+    "done",
+    "failed",
+    name="catalog_storage_delete_status_enum",
+    native_enum=True,
+)
+
+_PRODUCT_ASSET_KIND_ENUM = Enum(
+    "image_url",
+    "duplicate_image_url",
+    "image_fingerprint",
+    name="catalog_product_asset_kind_enum",
+    native_enum=True,
+)
+
+
 class _CatalogProduct(_CatalogBase):
     __tablename__ = "catalog_products"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
 
-    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    canonical_product_id: Mapped[str] = mapped_column(_uuid_text(), nullable=False, index=True)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
@@ -93,8 +141,8 @@ class _CatalogProduct(_CatalogBase):
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    primary_category_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
-    settlement_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    primary_category_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True, index=True)
+    settlement_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True, index=True)
 
     composition_original: Mapped[str | None] = mapped_column(Text, nullable=True)
     composition_normalized: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -116,16 +164,16 @@ class _CatalogProduct(_CatalogBase):
 class _CatalogProductSnapshot(_CatalogBase):
     __tablename__ = "catalog_product_snapshots"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
 
-    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    canonical_product_id: Mapped[str] = mapped_column(_uuid_text(), nullable=False, index=True)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    receiver_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    receiver_sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    receiver_sort_order: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
 
     source_event_uid: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
     content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
@@ -153,8 +201,8 @@ class _CatalogProductSource(_CatalogBase):
 
     parser_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     source_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    latest_snapshot_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    canonical_product_id: Mapped[str] = mapped_column(_uuid_text(), nullable=False, index=True)
+    latest_snapshot_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     latest_content_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -164,7 +212,7 @@ class _CatalogProductSource(_CatalogBase):
 class _CatalogSettlement(_CatalogBase):
     __tablename__ = "catalog_settlements"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     geo_key: Mapped[str] = mapped_column(String(191), nullable=False, unique=True)
     country: Mapped[str | None] = mapped_column(String(64), nullable=True)
     country_normalized: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -176,30 +224,53 @@ class _CatalogSettlement(_CatalogBase):
     alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geo_point: Mapped[str | None] = mapped_column(_GeographyPointType(), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_catalog_settlements_geo_point_gist",
+            "geo_point",
+            postgresql_using="gist",
+        ),
+    )
 
 
 class _CatalogSettlementGeodata(_CatalogBase):
     __tablename__ = "catalog_settlement_geodata"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     geo_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    settlement_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    settlement_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False, index=True)
     latitude: Mapped[float] = mapped_column(Float, nullable=False)
     longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    geo_point: Mapped[str | None] = mapped_column(_GeographyPointType(), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    receiver_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_catalog_settlement_geodata_geo_point_gist",
+            "geo_point",
+            postgresql_using="gist",
+        ),
+        Index(
+            "ix_catalog_settlement_geodata_settlement_observed_at",
+            "settlement_id",
+            "observed_at",
+        ),
+    )
 
 
 class _CatalogCategory(_CatalogBase):
     __tablename__ = "catalog_categories"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     category_key: Mapped[str] = mapped_column(String(191), nullable=False, unique=True)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     source_uid: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
@@ -217,8 +288,8 @@ class _CatalogCategory(_CatalogBase):
 class _CatalogProductCategoryLink(_CatalogBase):
     __tablename__ = "catalog_product_category_links"
 
-    snapshot_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    category_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot_id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    category_id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
     sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -230,7 +301,7 @@ class _CatalogIdentityMap(_CatalogBase):
     parser_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     identity_type: Mapped[str] = mapped_column(String(64), primary_key=True)
     identity_value: Mapped[str] = mapped_column(String(255), primary_key=True)
-    canonical_product_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    canonical_product_id: Mapped[str] = mapped_column(_uuid_text(), nullable=False, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -246,10 +317,10 @@ class _CatalogImageFingerprint(_CatalogBase):
 class _CatalogProductAsset(_CatalogBase):
     __tablename__ = "catalog_product_assets"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    product_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False, index=True)
+    asset_kind: Mapped[str] = mapped_column(_PRODUCT_ASSET_KIND_ENUM, nullable=False)
+    sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -268,24 +339,26 @@ class _ConverterSyncState(_CatalogBase):
     __tablename__ = "converter_sync_state"
 
     state_key: Mapped[str] = mapped_column("key", String(191), primary_key=True)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cursor_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cursor_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class _CatalogIngestStageProduct(_CatalogBase):
     __tablename__ = "catalog_ingest_stage_products"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    row_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_no: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    canonical_product_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    canonical_product_id: Mapped[str | None] = mapped_column(_uuid_text(), nullable=True)
     content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     source_event_uid: Mapped[str] = mapped_column(String(191), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    receiver_product_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    receiver_artifact_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
@@ -300,12 +373,12 @@ class _CatalogIngestStageProduct(_CatalogBase):
 class _CatalogIngestStageAsset(_CatalogBase):
     __tablename__ = "catalog_ingest_stage_assets"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    asset_kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_kind: Mapped[str] = mapped_column(_PRODUCT_ASSET_KIND_ENUM, nullable=False)
+    sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -313,15 +386,15 @@ class _CatalogIngestStageAsset(_CatalogBase):
 class _CatalogIngestStageCategory(_CatalogBase):
     __tablename__ = "catalog_ingest_stage_categories"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
     source_id: Mapped[str] = mapped_column(String(255), nullable=False)
     uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    depth: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     alias: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -329,11 +402,11 @@ class _CatalogIngestStageCategory(_CatalogBase):
 class _CatalogStorageDeleteOutbox(_CatalogBase):
     __tablename__ = "catalog_storage_delete_outbox"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     image_url: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(_STORAGE_DELETE_STATUS_ENUM, nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False, default=0)
     enqueued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

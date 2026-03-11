@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import JSON, String, Text
+from datetime import datetime
+
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -10,10 +14,18 @@ class _ReceiverBase(DeclarativeBase):
     pass
 
 
+def _bigint_sqlite() -> BigInteger:
+    return BigInteger().with_variant(Integer(), "sqlite")
+
+
+def _json_postgres() -> JSON:
+    return JSON().with_variant(JSONB(), "postgresql")
+
+
 class _RunArtifact(_ReceiverBase):
     __tablename__ = "run_artifacts"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     parser_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -31,14 +43,17 @@ class _RunArtifact(_ReceiverBase):
     latitude: Mapped[float | None] = mapped_column(nullable=True)
     dataclass_validated: Mapped[bool | None] = mapped_column(nullable=True)
     dataclass_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    ingested_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ingested_at: Mapped[datetime | str | None] = mapped_column(
+        DateTime(timezone=True).with_variant(String(64), "sqlite"),
+        nullable=True,
+    )
 
 
 class _RunArtifactProduct(_ReceiverBase):
     __tablename__ = "run_artifact_products"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    artifact_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
 
     sku: Mapped[str | None] = mapped_column(String(128), nullable=True)
     plu: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -68,7 +83,7 @@ class _RunArtifactProduct(_ReceiverBase):
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
-    categories_uid_json: Mapped[Any] = mapped_column(JSON, nullable=True)
+    categories_uid_json: Mapped[Any] = mapped_column(_json_postgres(), nullable=True)
     main_image: Mapped[str | None] = mapped_column(Text, nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
 
@@ -76,8 +91,8 @@ class _RunArtifactProduct(_ReceiverBase):
 class _RunArtifactCategory(_ReceiverBase):
     __tablename__ = "run_artifact_categories"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    artifact_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -92,8 +107,8 @@ class _RunArtifactCategory(_ReceiverBase):
 class _RunArtifactAdministrativeUnit(_ReceiverBase):
     __tablename__ = "run_artifact_administrative_units"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    artifact_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    artifact_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
 
     settlement_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -107,8 +122,8 @@ class _RunArtifactAdministrativeUnit(_ReceiverBase):
 class _RunArtifactProductImage(_ReceiverBase):
     __tablename__ = "run_artifact_product_images"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_main: Mapped[bool | None] = mapped_column(nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
@@ -117,8 +132,8 @@ class _RunArtifactProductImage(_ReceiverBase):
 class _RunArtifactProductMeta(_ReceiverBase):
     __tablename__ = "run_artifact_product_meta"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     value_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -129,8 +144,8 @@ class _RunArtifactProductMeta(_ReceiverBase):
 class _RunArtifactProductWholesalePrice(_ReceiverBase):
     __tablename__ = "run_artifact_product_wholesale_prices"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     from_items: Mapped[float | None] = mapped_column(nullable=True)
     price: Mapped[float | None] = mapped_column(nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
@@ -139,8 +154,8 @@ class _RunArtifactProductWholesalePrice(_ReceiverBase):
 class _RunArtifactProductCategory(_ReceiverBase):
     __tablename__ = "run_artifact_product_categories"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(nullable=False)
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
+    product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     category_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
     sort_order: Mapped[int | None] = mapped_column(nullable=True)
 

@@ -25,7 +25,7 @@ class PollingJob:
     receiver_fetch_size: int = 2000
     write_chunk_size: int = 1000
     sync_version: str = "v2"
-    writer_mode: str = "mysql_v2"
+    writer_mode: str = "pg_v2"
     max_batches: int = 0
 
     def to_sync_job(self) -> SyncJob:

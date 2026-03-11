@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--receiver-fetch-size", type=int, default=2000, help="Receiver fetch size")
     parser.add_argument("--write-chunk-size", type=int, default=1000, help="Atomic write chunk size")
     parser.add_argument("--sync-version", choices=("v2",), default="v2", help="Sync version")
-    parser.add_argument("--writer-mode", choices=("mysql_v2",), default="mysql_v2", help="Writer mode")
+    parser.add_argument("--writer-mode", choices=("pg_v2",), default="pg_v2", help="Writer mode")
     parser.add_argument("--max-batches", type=int, default=0, help="Max batches per polling cycle")
     parser.add_argument("--poll-interval-sec", type=float, default=5.0, help="Polling interval in seconds")
 

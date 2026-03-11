@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 from converter.core.models import ChunkApplyResultV2, NormalizedProductRecord, RawProductRecord, SyncChunkV2
-from converter.sync import ConverterSyncService, SyncJob
+from converter.sync import ConverterSyncService, SyncJob, build_catalog_repository, build_receiver_repository
 
 
 class _FakeHandler:
@@ -75,6 +75,12 @@ class _FakeCatalogRepository:
 
 
 class ConverterSyncServiceTests(unittest.TestCase):
+    def test_repository_builders_reject_non_postgresql_dsn(self) -> None:
+        with self.assertRaises(ValueError):
+            build_receiver_repository("mysql+pymysql://u:p@127.0.0.1:3306/receiver")
+        with self.assertRaises(ValueError):
+            build_catalog_repository("mysql+pymysql://u:p@127.0.0.1:3306/catalog")
+
     def test_run_splits_batch_into_write_chunks(self) -> None:
         records: list[RawProductRecord] = []
         for idx in range(5):

@@ -9,7 +9,7 @@ from converter.adapters.storage_http import StorageHTTPRepository
 
 
 class _DeleteHandler(BaseHTTPRequestHandler):
-    server: "_DeleteServer"
+    server: "_StorageServer"
 
     def do_DELETE(self) -> None:  # noqa: N802
         self.server.paths.append(self.path)
@@ -17,11 +17,27 @@ class _DeleteHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.end_headers()
 
+    def do_POST(self) -> None:  # noqa: N802
+        self.server.paths.append(self.path)
+        self.server.auth_headers.append((self.headers.get("Authorization") or "").strip())
+        if self.path.startswith("/api/images/missing.webp/persist"):
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.end_headers()
+            return
+        if self.path.startswith("/api/images/") and self.path.endswith("/persist"):
+            image_name = self.path.removeprefix("/api/images/").removesuffix("/persist")
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", f"/images_permanent/{image_name}")
+            self.end_headers()
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.end_headers()
+
     def log_message(self, fmt: str, *args: object) -> None:
         return
 
 
-class _DeleteServer(ThreadingHTTPServer):
+class _StorageServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, server_address, handler_cls) -> None:
@@ -32,7 +48,7 @@ class _DeleteServer(ThreadingHTTPServer):
 
 class StorageHTTPRepositoryTests(unittest.TestCase):
     def test_delete_images_skips_foreign_urls_and_deduplicates(self) -> None:
-        server = _DeleteServer(("127.0.0.1", 0), _DeleteHandler)
+        server = _StorageServer(("127.0.0.1", 0), _DeleteHandler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -48,14 +64,77 @@ class StorageHTTPRepositoryTests(unittest.TestCase):
                 [
                     f"{base_url}/images/a.webp",
                     f"{base_url}/images/a.webp",
+                    f"{base_url}/images_permanent/a.webp",
                     f"{base_url}/images/b.webp",
                     "http://other-host/images/c.webp",
                     "https://example.org/remote.webp",
                 ]
             )
 
-            self.assertEqual(server.paths, ["/api/images/a.webp", "/api/images/b.webp"])
+            self.assertEqual(
+                server.paths,
+                ["/api/images/a.webp?scope=both", "/api/images/b.webp?scope=both"],
+            )
             self.assertEqual(server.auth_headers, ["Bearer test-token", "Bearer test-token"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+
+    def test_persist_images_rewrites_url_with_location(self) -> None:
+        server = _StorageServer(("127.0.0.1", 0), _DeleteHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            repo = StorageHTTPRepository(
+                base_url=base_url,
+                api_token="test-token",
+                timeout_seconds=2.0,
+                fail_on_error=True,
+            )
+
+            persisted = repo.persist_images(
+                [
+                    f"{base_url}/images/a.webp",
+                    f"{base_url}/images/a.webp",
+                    f"{base_url}/images_permanent/a.webp",
+                    "https://example.org/remote.webp",
+                ]
+            )
+
+            self.assertEqual(
+                persisted,
+                [
+                    f"{base_url}/images_permanent/a.webp",
+                    f"{base_url}/images_permanent/a.webp",
+                    f"{base_url}/images_permanent/a.webp",
+                    "https://example.org/remote.webp",
+                ],
+            )
+            self.assertEqual(server.paths, ["/api/images/a.webp/persist"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2.0)
+            server.server_close()
+
+    def test_persist_images_best_effort_keeps_original_on_not_found(self) -> None:
+        server = _StorageServer(("127.0.0.1", 0), _DeleteHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address
+            base_url = f"http://{host}:{port}"
+            repo = StorageHTTPRepository(
+                base_url=base_url,
+                api_token="test-token",
+                timeout_seconds=2.0,
+                fail_on_error=False,
+            )
+            source = f"{base_url}/images/missing.webp"
+            persisted = repo.persist_images([source])
+            self.assertEqual(persisted, [source])
         finally:
             server.shutdown()
             thread.join(timeout=2.0)

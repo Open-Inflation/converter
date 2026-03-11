@@ -1,5 +1,5 @@
 sqlalchemy
-pymysql
+psycopg[binary]
 pymorphy3
 razdel
 stop-words

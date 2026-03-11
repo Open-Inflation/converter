@@ -17,6 +17,19 @@ from converter.core.ports import StorageRepository
 class _FakeStorageRepository(StorageRepository):
     def __init__(self) -> None:
         self.deleted_batches: list[list[str]] = []
+        self.persisted_batches: list[list[str]] = []
+
+    def persist_images(self, urls) -> list[str]:  # type: ignore[override]
+        batch = list(urls)
+        self.persisted_batches.append(batch)
+        out: list[str] = []
+        for url in batch:
+            token = str(url)
+            if "/images/" in token:
+                out.append(token.replace("/images/", "/images_permanent/"))
+            else:
+                out.append(token)
+        return out
 
     def delete_images(self, urls) -> None:  # type: ignore[override]
         self.deleted_batches.append(list(urls))
@@ -51,7 +64,7 @@ class _DeadlockOnceCatalogRepository(CatalogSQLiteRepository):
             raise OperationalError(
                 "UPDATE catalog_products SET updated_at = ...",
                 {"product_id": 1},
-                RuntimeError(1213, "Deadlock found when trying to get lock; try restarting transaction"),
+                RuntimeError("40P01", "deadlock detected"),
             )
         return super()._upsert_many_in_session(session, records)
 
@@ -67,7 +80,7 @@ class _DuplicateKeyOnceCatalogRepository(CatalogSQLiteRepository):
             raise IntegrityError(
                 "INSERT INTO catalog_identity_map (...) VALUES (...)",
                 {"parser_name": "fixprice"},
-                RuntimeError(1062, "Duplicate entry for key 'catalog_identity_map.PRIMARY'"),
+                RuntimeError("23505", "duplicate key value violates unique constraint"),
             )
         return super()._upsert_many_in_session(session, records)
 
@@ -998,7 +1011,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT name, region, country, latitude, longitude FROM catalog_settlements"
+                    "SELECT name, region, country, latitude, longitude, geo_point FROM catalog_settlements"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
                 self.assertEqual(settlement["name"], "Санкт-Петербург")
@@ -1006,6 +1019,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(settlement["country"], "RUS")
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
+                self.assertIsNotNone(settlement["geo_point"])
 
                 geo_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_settlement_geodata").fetchone()
                 self.assertEqual(int(geo_rows["cnt"]), 1)
@@ -1110,12 +1124,123 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 geo = conn.execute(
-                    "SELECT latitude, longitude FROM catalog_settlement_geodata ORDER BY id DESC LIMIT 1"
+                    "SELECT latitude, longitude, geo_point FROM catalog_settlement_geodata ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 self.assertIsNotNone(geo)
                 assert geo is not None
                 self.assertAlmostEqual(float(geo["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(geo["longitude"]), 30.31413, places=5)
+                self.assertIsNotNone(geo["geo_point"])
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_skips_invalid_geodata_coordinates_without_failing(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            raw = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-geo-invalid:1",
+                sku="geo-invalid-1",
+                title="Тарелка",
+                geo="RUS, Ленинградская область, Санкт-Петербург",
+                observed_at=datetime(2026, 2, 10, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-geo-invalid",
+                    "receiver_artifact_id": 900,
+                    "receiver_product_id": 99,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_latitude": 120.0,
+                    "receiver_geo_longitude": 300.0,
+                },
+            )
+
+            normalized = pipeline.process_one(raw)
+            repo.upsert_many([normalized])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                settlement = conn.execute(
+                    "SELECT latitude, longitude, geo_point FROM catalog_settlements ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                self.assertIsNotNone(settlement)
+                assert settlement is not None
+                self.assertIsNone(settlement["latitude"])
+                self.assertIsNone(settlement["longitude"])
+                self.assertIsNone(settlement["geo_point"])
+
+                geo_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_settlement_geodata").fetchone()
+                self.assertEqual(int(geo_rows["cnt"]), 0)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_geodata_history_orders_by_observed_at(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            raw_first = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-geo-history:1",
+                sku="geo-history-1",
+                title="Тарелка",
+                geo="RUS, Ленинградская область, Санкт-Петербург",
+                observed_at=datetime(2026, 2, 10, 10, 0, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-geo-history",
+                    "receiver_artifact_id": 901,
+                    "receiver_product_id": 1,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_latitude": 59.93863,
+                    "receiver_geo_longitude": 30.31413,
+                },
+            )
+            raw_second = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-geo-history:1",
+                sku="geo-history-1",
+                title="Тарелка",
+                geo="RUS, Ленинградская область, Санкт-Петербург",
+                observed_at=datetime(2026, 2, 10, 10, 5, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-geo-history",
+                    "receiver_artifact_id": 902,
+                    "receiver_product_id": 2,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_latitude": 59.93864,
+                    "receiver_geo_longitude": 30.31414,
+                },
+            )
+
+            repo.upsert_many([pipeline.process_one(raw_first)])
+            repo.upsert_many([pipeline.process_one(raw_second)])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT observed_at, latitude, longitude
+                    FROM catalog_settlement_geodata
+                    ORDER BY observed_at ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(rows), 2)
+                self.assertLessEqual(str(rows[0]["observed_at"]), str(rows[1]["observed_at"]))
             finally:
                 conn.close()
         finally:
@@ -1150,11 +1275,18 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             repo.upsert_many([record])
 
             self.assertEqual(storage.deleted_batches, [])
+            self.assertEqual(
+                storage.persisted_batches,
+                [[
+                    "http://storage.local/images/dup.webp",
+                    "http://storage.local/images/dup.webp",
+                ]],
+            )
             outbox_result = repo.process_storage_delete_outbox(limit=10)
             self.assertEqual(outbox_result["processed"], 1)
             self.assertEqual(outbox_result["deleted"], 1)
             self.assertEqual(outbox_result["failed"], 0)
-            self.assertEqual(storage.deleted_batches, [["http://storage.local/images/dup.webp"]])
+            self.assertEqual(storage.deleted_batches, [["http://storage.local/images_permanent/dup.webp"]])
         finally:
             db_path.unlink(missing_ok=True)
 

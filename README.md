@@ -65,11 +65,8 @@ Converter сохраняет расширенный product-контракт в 
 Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-таблицы и лишние snapshot-поля.
 Автоматической миграции в `CatalogRepository` больше нет: запуск migration выполняется вручную отдельной командой.
 
-Ручная миграция выполняется только SQL-скриптом:
-
-```bash
-mysql -u user -p -D catalog < sql/migrations/20260303_snapshot_events_mysql.sql
-```
+Целевая production-СУБД: PostgreSQL (`postgresql+psycopg://...`).
+SQLite оставлен только для локальных тестов/фикстур.
 
 Политика обновления:
 
@@ -136,13 +133,13 @@ python3 sync_receiver_to_catalog.py \
   --sync-version v2
 ```
 
-Полный sync `receiver -> catalog` (MySQL):
+Полный sync `receiver -> catalog` (PostgreSQL):
 
 ```bash
-pip install sqlalchemy pymysql pymorphy3 razdel stop-words
+pip install -r requirements.txt
 python3 sync_receiver_to_catalog.py \
-  --receiver-db 'mysql+pymysql://user:pass@127.0.0.1:3306/receiver' \
-  --catalog-db 'mysql+pymysql://user:pass@127.0.0.1:3306/catalog' \
+  --receiver-db 'postgresql+psycopg://user:pass@127.0.0.1:5432/receiver' \
+  --catalog-db 'postgresql+psycopg://user:pass@127.0.0.1:5432/catalog' \
   --parser-name fixprice \
   --receiver-fetch-size 2000 \
   --write-chunk-size 1000 \
@@ -157,8 +154,9 @@ python3 sync_receiver_to_catalog.py \
 - `CONVERTER_STORAGE_API_TOKEN` (или `STORAGE_API_TOKEN`) — токен `Bearer`.
 - `CONVERTER_STORAGE_DELETE_TIMEOUT_SEC` — timeout `DELETE` запроса (по умолчанию `10`).
 - ошибка удаления больше не прерывает `apply_chunk`, обработка идет через retry в outbox worker.
+- перед dedup конвертер вызывает `POST /api/images/{image_name}/persist` (best effort) и сохраняет новый `Location` URL.
 
-Удаление выполняется только для URL текущего storage origin и путей `/images/<name>`.
+Удаление выполняется только для URL текущего storage origin и путей `/images/<name>` / `/images_permanent/<name>`.
 
 ### Демон (polling)
 
@@ -172,7 +170,7 @@ python3 converter_daemon.py \
   --receiver-fetch-size 2000 \
   --write-chunk-size 1000 \
   --sync-version v2 \
-  --writer-mode mysql_v2 \
+  --writer-mode pg_v2 \
   --poll-interval-sec 5
 ```
 

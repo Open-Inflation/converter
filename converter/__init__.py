@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from .adapters import (
-    CatalogMySQLRepository,
+    CatalogPostgreSQLRepository,
     CatalogSQLiteRepository,
-    ReceiverMySQLRepository,
+    ReceiverPostgreSQLRepository,
     ReceiverSQLiteRepository,
-    is_mysql_dsn,
+    is_postgres_dsn,
 )
 from .core.registry import HandlerRegistry
 from .daemon import ConverterDaemon, PollingJob
@@ -21,17 +21,17 @@ def build_default_pipeline() -> ConverterPipeline:
 
 
 __all__ = [
-    "CatalogMySQLRepository",
+    "CatalogPostgreSQLRepository",
     "CatalogSQLiteRepository",
     "ConverterDaemon",
     "ConverterPipeline",
     "ConverterSyncService",
     "PollingJob",
-    "ReceiverMySQLRepository",
+    "ReceiverPostgreSQLRepository",
     "ReceiverSQLiteRepository",
     "SyncBatchEvent",
     "SyncJob",
     "SyncOutcome",
     "build_default_pipeline",
-    "is_mysql_dsn",
+    "is_postgres_dsn",
 ]

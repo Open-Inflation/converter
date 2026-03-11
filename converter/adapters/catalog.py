@@ -15,6 +15,7 @@ from sqlalchemy import (
     delete,
     insert,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -70,8 +71,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         "package_quantity",
         "package_unit",
     )
-    _RETRYABLE_MYSQL_OPERATIONAL_ERROR_CODES = {1205, 1213}
-    _RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES: set[int] = set()
+    _RETRYABLE_POSTGRESQL_SQLSTATES = {"40P01", "40001"}
     _TXN_RETRY_ATTEMPTS = 5
     _TXN_RETRY_BASE_DELAY_SEC = 0.2
     _TXN_RETRY_MAX_DELAY_SEC = 2.0
@@ -97,6 +97,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             storage_repository or self._build_storage_repository_from_env()
         )
         self._category_text_normalizer = RussianTextNormalizer()
+        self._ensure_database_extensions()
         _CatalogBase.metadata.create_all(self._engine)
         if validate_schema:
             self._validate_catalog_products_schema()
@@ -105,6 +106,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             self._engine.dialect.name,
             self._storage_repository is not None,
         )
+
+    def _ensure_database_extensions(self) -> None:
+        if self._engine.dialect.name != "postgresql":
+            return
+        with self._engine.begin() as connection:
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
@@ -273,12 +280,21 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 LOGGER.debug("Catalog cursor missing: parser=%s", parser_name)
                 return None, None
 
-            token = _safe_str(row.value)
-            if token is None:
-                LOGGER.debug("Catalog cursor invalid empty value: parser=%s", parser_name)
-                return None, None
+            typed_ingested_at = getattr(row, "cursor_ingested_at", None)
+            typed_product_id = self._to_int(getattr(row, "cursor_product_id", None))
+            if typed_ingested_at is not None and typed_product_id is not None:
+                ingested_at = self._to_utc(typed_ingested_at).isoformat()
+                product_id = typed_product_id
+                LOGGER.debug(
+                    "Catalog cursor loaded: parser=%s ingested_at=%s product_id=%s",
+                    parser_name,
+                    ingested_at,
+                    product_id,
+                )
+                return ingested_at, product_id
 
-            if "\t" not in token:
+            token = _safe_str(row.value)
+            if token is None or "\t" not in token:
                 LOGGER.debug("Catalog cursor invalid format: parser=%s value=%s", parser_name, token)
                 return None, None
             ingested_at_raw, product_id_raw = token.rsplit("\t", 1)
@@ -332,18 +348,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     session.commit()
                 return
             except (OperationalError, IntegrityError) as exc:
-                code = self._extract_mysql_error_code(exc)
-                is_retryable_operational = (
-                    isinstance(exc, OperationalError)
-                    and code in self._RETRYABLE_MYSQL_OPERATIONAL_ERROR_CODES
+                code = self._extract_db_error_code(exc)
+                is_retryable = (
+                    isinstance(code, str)
+                    and code.upper() in self._RETRYABLE_POSTGRESQL_SQLSTATES
+                    and isinstance(exc, (OperationalError, IntegrityError))
                 )
-                is_retryable_integrity = (
-                    isinstance(exc, IntegrityError)
-                    and code in self._RETRYABLE_MYSQL_INTEGRITY_ERROR_CODES
-                )
-                if (not is_retryable_operational and not is_retryable_integrity) or (
-                    attempt >= self._TXN_RETRY_ATTEMPTS
-                ):
+                if (not is_retryable) or (attempt >= self._TXN_RETRY_ATTEMPTS):
                     raise
 
                 delay = min(
@@ -351,7 +362,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     self._TXN_RETRY_MAX_DELAY_SEC,
                 )
                 LOGGER.warning(
-                    "Transient DB error on %s (error_type=%s, mysql_code=%s, attempt=%s/%s). Retrying in %.2fs.",
+                    "Transient DB error on %s (error_type=%s, db_code=%s, attempt=%s/%s). Retrying in %.2fs.",
                     operation_name,
                     type(exc).__name__,
                     code,
@@ -362,8 +373,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 sleep(delay)
 
     @staticmethod
-    def _extract_mysql_error_code(exc: Exception) -> int | None:
+    def _extract_db_error_code(exc: Exception) -> str | int | None:
         original = getattr(exc, "orig", None)
+        pg_code = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+        if isinstance(pg_code, str) and pg_code.strip():
+            return pg_code.strip().upper()
         args = getattr(original, "args", None)
         if args is None:
             args = getattr(exc, "args", None)
@@ -372,8 +386,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         code = args[0]
         if isinstance(code, int):
             return code
-        if isinstance(code, str) and code.isdigit():
-            return int(code)
+        if isinstance(code, str):
+            token = code.strip()
+            if token.isdigit():
+                return int(token)
+            if token:
+                return token.upper()
         return None
 
     def _set_receiver_cursor_in_session(
@@ -385,6 +403,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         product_id: int,
     ) -> None:
         encoded = f"{ingested_at}\t{int(product_id)}"
+        parsed_ingested_at = self._parse_iso_datetime(ingested_at)
         now = _utc_now()
         key = self._cursor_key(parser_name)
         row = session.get(_ConverterSyncState, key)
@@ -392,6 +411,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             row = _ConverterSyncState(
                 state_key=key,
                 value=encoded,
+                cursor_ingested_at=parsed_ingested_at,
+                cursor_product_id=int(product_id),
                 updated_at=now,
             )
             session.add(row)
@@ -428,6 +449,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return
 
         row.value = encoded
+        row.cursor_ingested_at = parsed_ingested_at
+        row.cursor_product_id = int(product_id)
         row.updated_at = now
         LOGGER.debug(
             "Catalog cursor updated: parser=%s ingested_at=%s product_id=%s",
@@ -446,6 +469,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     ) -> bool:
         if current_ingested_at is None:
             return True
+        new_dt = CatalogRepository._parse_iso_datetime(new_ingested_at)
+        current_dt = CatalogRepository._parse_iso_datetime(current_ingested_at)
+        if new_dt is not None and current_dt is not None:
+            if new_dt > current_dt:
+                return True
+            if new_dt < current_dt:
+                return False
+            return int(new_product_id) > int(current_product_id or 0)
         if new_ingested_at > current_ingested_at:
             return True
         if new_ingested_at < current_ingested_at:
@@ -826,11 +857,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         }
 
         dialect_name = session.get_bind().dialect.name
-        if dialect_name == "mysql":
-            from sqlalchemy.dialects.mysql import insert as mysql_insert
+        if dialect_name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as postgres_insert
 
-            stmt = mysql_insert(_CatalogIdentityMap).values(**values).on_duplicate_key_update(
-                updated_at=updated_at
+            stmt = postgres_insert(_CatalogIdentityMap).values(**values).on_conflict_do_nothing(
+                index_elements=("parser_name", "identity_type", "identity_value"),
             )
             session.execute(stmt)
         elif dialect_name == "sqlite":
@@ -884,6 +915,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
     def _apply_persistent_image_dedup(self, session: Session, record: NormalizedProductRecord) -> None:
         original_image_count = len(record.image_urls)
+        self._persist_record_images(record)
         unique_urls: list[str] = []
         duplicate_urls: list[str] = []
         fingerprints: list[str] = []
@@ -935,6 +967,40 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             len(duplicates_to_delete),
         )
         self._enqueue_duplicate_images(session, duplicates_to_delete)
+
+    def _persist_record_images(self, record: NormalizedProductRecord) -> None:
+        storage = self._storage_repository
+        if storage is None or not record.image_urls:
+            return
+
+        persist_handler = getattr(storage, "persist_images", None)
+        if not callable(persist_handler):
+            return
+
+        try:
+            persisted = persist_handler(list(record.image_urls))
+        except Exception as exc:
+            LOGGER.warning(
+                "Catalog image persist failed (best effort): parser=%s source_id=%s error=%s",
+                record.parser_name,
+                self._source_id(record),
+                exc,
+            )
+            return
+
+        if not isinstance(persisted, list):
+            return
+        normalized: list[str] = []
+        for idx, value in enumerate(persisted):
+            token = _safe_str(value)
+            if token is None:
+                original = _safe_str(record.image_urls[idx]) if idx < len(record.image_urls) else None
+                if original is not None:
+                    normalized.append(original)
+                continue
+            normalized.append(token)
+        if normalized:
+            record.image_urls = normalized
 
     @staticmethod
     def _get_image_fingerprint_row(
@@ -1086,7 +1152,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         snapshot_fingerprint: str,
         source_event_uid: str | None,
     ) -> tuple[_CatalogProductSnapshot, bool]:
-        now = _utc_now()
         observed_at = self._to_utc(record.observed_at)
         event_uid = _safe_str(source_event_uid)
 
@@ -1119,7 +1184,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             valid_from_at=observed_at,
             valid_to_at=observed_at,
             observed_at=observed_at,
-            created_at=now,
+            created_at=observed_at,
             price=record.price,
             discount_price=record.discount_price,
             loyal_price=record.loyal_price,
@@ -1196,6 +1261,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 settlement_cache[key] = row
 
         if row is None:
+            geo_point = self._to_geo_point(
+                latitude=_as_float(geo.get("latitude")),
+                longitude=_as_float(geo.get("longitude")),
+            )
             row = _CatalogSettlement(
                 geo_key=key,
                 country=geo.get("country"),
@@ -1208,6 +1277,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 alias=geo.get("alias"),
                 latitude=geo.get("latitude"),
                 longitude=geo.get("longitude"),
+                geo_point=geo_point,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
                 updated_at=now,
@@ -1238,6 +1308,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self._fill_missing(row, "alias", geo.get("alias"))
         self._fill_missing(row, "latitude", geo.get("latitude"))
         self._fill_missing(row, "longitude", geo.get("longitude"))
+        self._fill_missing(
+            row,
+            "geo_point",
+            self._to_geo_point(
+                latitude=_as_float(geo.get("latitude")),
+                longitude=_as_float(geo.get("longitude")),
+            ),
+        )
 
         LOGGER.debug(
             "Catalog settlement updated: parser=%s source_id=%s settlement_id=%s geo_key=%s",
@@ -1260,9 +1338,31 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return
 
         latitude, longitude = self._extract_geo_coordinates(payload)
+        normalized_geo = self._normalize_geo_coordinates(latitude, longitude)
+        if latitude is not None and longitude is not None and normalized_geo is None:
+            LOGGER.warning(
+                "Catalog settlement coordinates skipped due to invalid range: parser=%s source_id=%s latitude=%s longitude=%s",
+                record.parser_name,
+                self._source_id(record),
+                latitude,
+                longitude,
+            )
+            latitude = None
+            longitude = None
+        elif normalized_geo is not None:
+            latitude, longitude = normalized_geo
         if latitude is None or longitude is None:
             return
-
+        normalized = self._normalize_geo_coordinates(latitude, longitude)
+        if normalized is None:
+            LOGGER.warning(
+                "Catalog geodata skipped due to invalid coordinate range: settlement_id=%s latitude=%s longitude=%s",
+                settlement.id,
+                latitude,
+                longitude,
+            )
+            return
+        latitude, longitude = normalized
         fingerprint = hashlib.sha256(f"{settlement.id}:{latitude:.8f}:{longitude:.8f}".encode("utf-8")).hexdigest()
         for pending in session.new:
             if not isinstance(pending, _CatalogSettlementGeodata):
@@ -1281,6 +1381,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             settlement_id=settlement.id,
             latitude=latitude,
             longitude=longitude,
+            geo_point=self._to_geo_point(latitude=latitude, longitude=longitude),
             observed_at=self._to_utc(record.observed_at),
             source_run_id=_safe_str(payload.get("receiver_run_id")),
             receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
@@ -1432,6 +1533,19 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         settlement_type = _safe_str(payload.get("receiver_geo_settlement_type"))
         alias = _safe_str(payload.get("receiver_geo_alias"))
         latitude, longitude = self._extract_geo_coordinates(payload)
+        normalized_geo = self._normalize_geo_coordinates(latitude, longitude)
+        if latitude is not None and longitude is not None and normalized_geo is None:
+            LOGGER.warning(
+                "Catalog settlement coordinates skipped due to invalid range: parser=%s source_id=%s latitude=%s longitude=%s",
+                record.parser_name,
+                self._source_id(record),
+                latitude,
+                longitude,
+            )
+            latitude = None
+            longitude = None
+        elif normalized_geo is not None:
+            latitude, longitude = normalized_geo
 
         if name is None and record.geo_normalized:
             parts = [segment.strip() for segment in str(record.geo_normalized).split(",") if segment.strip()]
@@ -1485,6 +1599,29 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 return latitude, longitude
 
         return None, None
+
+    @staticmethod
+    def _normalize_geo_coordinates(
+        latitude: float | None,
+        longitude: float | None,
+    ) -> tuple[float, float] | None:
+        if latitude is None or longitude is None:
+            return None
+        lat = float(latitude)
+        lon = float(longitude)
+        if lat < -90.0 or lat > 90.0:
+            return None
+        if lon < -180.0 or lon > 180.0:
+            return None
+        return round(lat, 8), round(lon, 8)
+
+    @staticmethod
+    def _to_geo_point(*, latitude: float | None, longitude: float | None) -> str | None:
+        normalized = CatalogRepository._normalize_geo_coordinates(latitude, longitude)
+        if normalized is None:
+            return None
+        lat, lon = normalized
+        return f"SRID=4326;POINT({lon:.8f} {lat:.8f})"
 
     def _extract_category_candidates(
         self,
@@ -1801,6 +1938,18 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _parse_iso_datetime(value: str) -> datetime | None:
+        token = _safe_str(value)
+        if token is None:
+            return None
+        normalized = token.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        return CatalogRepository._to_utc(parsed)
 
     @staticmethod
     def _max_datetime(left: datetime, right: datetime) -> datetime:

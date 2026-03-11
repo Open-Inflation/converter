@@ -11,11 +11,11 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from .adapters import (
-    CatalogMySQLRepository,
+    CatalogPostgreSQLRepository,
     CatalogSQLiteRepository,
-    ReceiverMySQLRepository,
+    ReceiverPostgreSQLRepository,
     ReceiverSQLiteRepository,
-    is_mysql_dsn,
+    is_postgres_dsn,
 )
 from .core.models import RawProductRecord, SyncChunkV2
 from .core.registry import HandlerRegistry
@@ -33,7 +33,7 @@ class SyncJob:
     receiver_fetch_size: int = 2000
     write_chunk_size: int = 1000
     sync_version: str = "v2"
-    writer_mode: str = "mysql_v2"
+    writer_mode: str = "pg_v2"
     max_batches: int = 0
 
 
@@ -127,15 +127,19 @@ def _chunk_id(
 
 def build_receiver_repository(dsn_or_path: str) -> Any:
     token = dsn_or_path.strip()
-    if is_mysql_dsn(token):
-        return ReceiverMySQLRepository.from_dsn(token)
+    if is_postgres_dsn(token):
+        return ReceiverPostgreSQLRepository.from_dsn(token)
+    if "://" in token:
+        raise ValueError(f"Unsupported receiver DSN: {token!r}. Only PostgreSQL DSN is supported.")
     return ReceiverSQLiteRepository(Path(token).resolve())
 
 
 def build_catalog_repository(dsn_or_path: str) -> Any:
     token = dsn_or_path.strip()
-    if is_mysql_dsn(token):
-        return CatalogMySQLRepository.from_dsn(token)
+    if is_postgres_dsn(token):
+        return CatalogPostgreSQLRepository.from_dsn(token)
+    if "://" in token:
+        raise ValueError(f"Unsupported catalog DSN: {token!r}. Only PostgreSQL DSN is supported.")
     return CatalogSQLiteRepository(Path(token).resolve())
 
 
@@ -143,14 +147,16 @@ def _safe_db_ref(dsn_or_path: str) -> str:
     token = (dsn_or_path or "").strip()
     if not token:
         return "<empty>"
-    if is_mysql_dsn(token):
+    if is_postgres_dsn(token):
         parsed = urlparse(token)
         host = parsed.hostname or "<host>"
         port = parsed.port
         db = parsed.path.lstrip("/") if parsed.path else ""
         port_part = f":{port}" if port else ""
         db_part = f"/{db}" if db else ""
-        return f"mysql://{host}{port_part}{db_part}"
+        return f"postgresql://{host}{port_part}{db_part}"
+    if "://" in token:
+        return "<unsupported-dsn>"
     return str(Path(token).resolve())
 
 
@@ -173,11 +179,11 @@ class ConverterSyncService:
         write_chunk_size = max(1, int(job.write_chunk_size))
         max_batches = max(0, int(job.max_batches))
         sync_version = (job.sync_version or "").strip().lower() or "v2"
-        writer_mode = (job.writer_mode or "").strip().lower() or "mysql_v2"
+        writer_mode = (job.writer_mode or "").strip().lower() or "pg_v2"
         if sync_version != "v2":
             raise ValueError(f"Unsupported sync_version: {sync_version!r}. Only 'v2' is supported.")
-        if writer_mode != "mysql_v2":
-            raise ValueError(f"Unsupported writer_mode: {writer_mode!r}. Only 'mysql_v2' is supported.")
+        if writer_mode != "pg_v2":
+            raise ValueError(f"Unsupported writer_mode: {writer_mode!r}. Only 'pg_v2' is supported.")
 
         LOGGER.info(
             "Sync started: parser=%s receiver=%s catalog=%s sync_version=%s writer_mode=%s receiver_fetch_size=%s write_chunk_size=%s max_batches=%s",

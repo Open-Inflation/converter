@@ -3,11 +3,16 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
 
 
 class StorageHTTPRepository:
@@ -50,6 +55,31 @@ class StorageHTTPRepository:
         for image_name in image_names:
             self._delete_one(image_name)
 
+    def persist_images(self, urls: Sequence[str]) -> list[str]:
+        out: list[str] = []
+        cache: dict[str, str] = {}
+        for raw_url in urls:
+            token = str(raw_url).strip()
+            if not token:
+                out.append(token)
+                continue
+
+            image_name = self._image_name_from_url(token)
+            if image_name is None:
+                out.append(token)
+                continue
+
+            if self._is_permanent_path(token):
+                out.append(token)
+                continue
+
+            persisted_url = cache.get(image_name)
+            if persisted_url is None:
+                persisted_url = self._persist_one(image_name=image_name, fallback_url=token)
+                cache[image_name] = persisted_url
+            out.append(persisted_url)
+        return out
+
     def _extract_unique_image_names(self, urls: Sequence[str]) -> list[str]:
         out: list[str] = []
         seen: set[str] = set()
@@ -79,8 +109,12 @@ class StorageHTTPRepository:
             image_name = clean_path.removeprefix("/api/images/")
         elif clean_path.startswith("/images/"):
             image_name = clean_path.removeprefix("/images/")
+        elif clean_path.startswith("/images_permanent/"):
+            image_name = clean_path.removeprefix("/images_permanent/")
         elif clean_path.startswith("images/"):
             image_name = clean_path.removeprefix("images/")
+        elif clean_path.startswith("images_permanent/"):
+            image_name = clean_path.removeprefix("images_permanent/")
         else:
             return None
 
@@ -95,7 +129,7 @@ class StorageHTTPRepository:
 
     def _delete_one(self, image_name: str) -> None:
         encoded = quote(image_name, safe="")
-        url = f"{self._base_url}/api/images/{encoded}"
+        url = f"{self._base_url}/api/images/{encoded}?scope=both"
 
         request = Request(
             url=url,
@@ -125,3 +159,70 @@ class StorageHTTPRepository:
             if self._fail_on_error:
                 raise RuntimeError(message) from exc
             LOGGER.warning(message)
+
+    def _persist_one(self, *, image_name: str, fallback_url: str) -> str:
+        encoded = quote(image_name, safe="")
+        url = f"{self._base_url}/api/images/{encoded}/persist"
+        request = Request(
+            url=url,
+            method="POST",
+            headers={"Authorization": f"Bearer {self._api_token}"},
+        )
+        opener = build_opener(_NoRedirectHandler())
+        try:
+            with opener.open(request, timeout=self._timeout_seconds) as response:
+                status = int(getattr(response, "status", 303))
+                location = str(getattr(response, "headers", {}).get("Location") or "").strip()
+                if status == 303 and location:
+                    persisted_url = urljoin(self._origin, location)
+                    LOGGER.debug(
+                        "Storage image persisted: image=%s status=%s persisted_url=%s",
+                        image_name,
+                        status,
+                        persisted_url,
+                    )
+                    return persisted_url
+                if status in {404, 409}:
+                    LOGGER.debug(
+                        "Storage image persist skipped: image=%s status=%s fallback=true",
+                        image_name,
+                        status,
+                    )
+                    return fallback_url
+                message = f"Storage persist failed for {image_name}: HTTP {status}"
+                if self._fail_on_error:
+                    raise RuntimeError(message)
+                LOGGER.warning(message)
+                return fallback_url
+        except HTTPError as exc:
+            if int(exc.code) == 303:
+                location = str((exc.headers or {}).get("Location") or "").strip()
+                if location:
+                    return urljoin(self._origin, location)
+                return fallback_url
+            if int(exc.code) in {404, 409}:
+                LOGGER.debug(
+                    "Storage image persist skipped: image=%s status=%s fallback=true",
+                    image_name,
+                    int(exc.code),
+                )
+                return fallback_url
+            message = f"Storage persist failed for {image_name}: HTTP {exc.code}"
+            if self._fail_on_error:
+                raise RuntimeError(message) from exc
+            LOGGER.warning(message)
+            return fallback_url
+        except URLError as exc:
+            message = f"Storage persist failed for {image_name}: {exc}"
+            if self._fail_on_error:
+                raise RuntimeError(message) from exc
+            LOGGER.warning(message)
+            return fallback_url
+
+    def _is_permanent_path(self, url: str) -> bool:
+        token = str(url).strip()
+        if not token:
+            return False
+        parsed = urlparse(token)
+        path = parsed.path if parsed.scheme and parsed.netloc else token
+        return path.strip().startswith("/images_permanent/") or path.strip().startswith("images_permanent/")
