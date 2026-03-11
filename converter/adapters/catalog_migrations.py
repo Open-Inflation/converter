@@ -4,6 +4,7 @@ import logging
 import os
 
 from sqlalchemy import inspect
+from sqlalchemy.sql.sqltypes import Enum as SAEnum
 
 from converter.core.ports import StorageRepository
 
@@ -222,8 +223,17 @@ class _CatalogSchemaMigrationMixin:
             info = columns.get(column_name)
             if info is None:
                 continue
-            type_token = str(info.get("type") or "").upper()
-            if not any(expected in type_token for expected in expected_tokens):
+            type_obj = info.get("type")
+            type_token = str(type_obj or "").upper()
+            type_class_name = type(type_obj).__name__.upper() if type_obj is not None else ""
+            is_sqlalchemy_enum = isinstance(type_obj, SAEnum)
+
+            matched = any(expected in type_token for expected in expected_tokens)
+            if not matched and "ENUM" in expected_tokens:
+                # PostgreSQL ENUM can be reflected as SA Enum whose string repr is VARCHAR(n).
+                matched = is_sqlalchemy_enum or "ENUM" in type_class_name
+
+            if not matched:
                 problems.append(f"{table_name}.{column_name}={type_token or 'UNKNOWN'}")
         if problems:
             raise RuntimeError(
