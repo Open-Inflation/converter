@@ -377,7 +377,12 @@ class ReceiverRepository:
 
     def _ensure_read_indexes(self) -> None:
         dialect = self._engine.dialect.name
-        if dialect not in {"postgresql", "sqlite"}:
+        if dialect == "postgresql":
+            LOGGER.debug(
+                "Receiver read-index auto-create is skipped for PostgreSQL: schema DDL is managed externally"
+            )
+            return
+        if dialect != "sqlite":
             return
 
         required_indexes = {
