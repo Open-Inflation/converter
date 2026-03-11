@@ -143,8 +143,13 @@ class SyncChunkV2:
     parser_name: str
     chunk_id: str
     records: list[NormalizedProductRecord]
-    cursor_ingested_at: str
-    cursor_product_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AckResult:
+    requested_products: int
+    deleted_products: int
+    deleted_artifacts: int
 
 
 @dataclass(frozen=True, slots=True)

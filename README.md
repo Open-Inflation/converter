@@ -119,7 +119,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 - `converter.adapters.CatalogSQLiteRepository`
 - выполняет `upsert` нормализованных товаров;
-- хранит persistent `canonical_product_id` map, image fingerprints и sync cursor.
+- хранит persistent `canonical_product_id` map и image fingerprints.
 
 Полный sync `receiver -> catalog` (SQLite):
 
@@ -175,7 +175,7 @@ python3 converter_daemon.py \
 ```
 
 `write_chunk_size` задаёт атомарный размер `apply_chunk`.
-Демон не использует HTTP trigger и самостоятельно подхватывает новые записи по cursor.
+Демон не использует HTTP trigger и работает в режиме consume-delete: после успешной записи chunk в `catalog` удаляет обработанные `run_artifact_products` из `receiver`.
 
 ## Как расширять
 

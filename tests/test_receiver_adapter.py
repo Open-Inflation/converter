@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from converter import ReceiverSQLiteRepository, build_default_pipeline
 
@@ -156,6 +157,29 @@ def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bo
             product_id INTEGER,
             category_uid TEXT,
             sort_order INTEGER
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE crawl_tasks (
+            id INTEGER PRIMARY KEY,
+            city TEXT,
+            store TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE task_runs (
+            id TEXT PRIMARY KEY,
+            task_id INTEGER,
+            orchestrator_id TEXT,
+            status TEXT,
+            converter_elapsed_sec INTEGER DEFAULT 0,
+            finish TEXT
         )
         """
     )
@@ -429,7 +453,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_new_schema_supports_incremental_cursor(self) -> None:
+    def test_delete_processed_products_cleans_orphans_and_keeps_scheduler_tables(self) -> None:
         db_path = self._make_db(include_artifact_parser_name=True)
         try:
             conn = sqlite3.connect(db_path)
@@ -451,13 +475,6 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                 )
                 cur.execute(
                     """
-                    INSERT INTO run_artifacts(id, run_id, source, parser_name, ingested_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (13, "run-3", "output_json", "perekrestok", "2026-02-27T12:02:00+00:00"),
-                )
-                cur.execute(
-                    """
                     INSERT INTO run_artifact_products(
                         id, artifact_id, sku, plu, title, composition, brand,
                         unit, available_count, package_quantity, package_unit,
@@ -474,7 +491,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (102, 12, "sku-102", None, "Товар 2", None, "Brand", "PCE", 3, None, None, "[]", "main-2", 0),
+                    (102, 11, "sku-102", None, "Товар 2", None, "Brand", "PCE", 3, None, None, "[]", "main-2", 0),
                 )
                 cur.execute(
                     """
@@ -484,29 +501,154 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (103, 13, "sku-103", None, "Товар 3", None, "Brand", "PCE", 4, None, None, "[]", "main-3", 0),
+                    (103, 12, "sku-103", None, "Товар 3", None, "Brand", "PCE", 4, None, None, "[]", "main-3", 0),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_categories(id, artifact_id, uid, title) VALUES (?, ?, ?, ?)",
+                    (1, 11, "cat-1", "Категория 1"),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_categories(id, artifact_id, uid, title) VALUES (?, ?, ?, ?)",
+                    (2, 12, "cat-2", "Категория 2"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO run_artifact_administrative_units(id, artifact_id, name, region, country)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (1, 11, "Москва", "г. Москва", "RUS"),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO run_artifact_administrative_units(id, artifact_id, name, region, country)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (2, 12, "Санкт-Петербург", "г. Санкт-Петербург", "RUS"),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_product_images(id, product_id, url, sort_order) VALUES (?, ?, ?, ?)",
+                    (1, 101, "img-101", 0),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_product_images(id, product_id, url, sort_order) VALUES (?, ?, ?, ?)",
+                    (2, 102, "img-102", 0),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_product_meta(id, product_id, name, value_text, sort_order) VALUES (?, ?, ?, ?, ?)",
+                    (1, 101, "meta", "m1", 0),
+                )
+                cur.execute(
+                    "INSERT INTO run_artifact_product_meta(id, product_id, name, value_text, sort_order) VALUES (?, ?, ?, ?, ?)",
+                    (2, 102, "meta", "m2", 0),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO run_artifact_product_wholesale_prices(id, product_id, from_items, price, sort_order)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (1, 101, 2, 10.0, 0),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO run_artifact_product_categories(id, product_id, category_uid, sort_order)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (1, 101, "cat-1", 0),
+                )
+                cur.execute(
+                    "INSERT INTO crawl_tasks(id, city, store) VALUES (?, ?, ?)",
+                    (99, "Moscow", "S1"),
+                )
+                cur.execute(
+                    "INSERT INTO task_runs(id, task_id, orchestrator_id, status) VALUES (?, ?, ?, ?)",
+                    ("run-keep", 99, "orch", "success"),
+                )
+                cur.execute(
+                    "INSERT INTO task_runs(id, task_id, orchestrator_id, status) VALUES (?, ?, ?, ?)",
+                    ("run-1", 99, "orch", "success"),
+                )
+                cur.execute(
+                    "INSERT INTO task_runs(id, task_id, orchestrator_id, status) VALUES (?, ?, ?, ?)",
+                    ("run-2", 99, "orch", "success"),
                 )
                 conn.commit()
             finally:
                 conn.close()
 
             repository = ReceiverSQLiteRepository(db_path)
+            with patch.object(type(repository), "_elapsed_seconds_since", return_value=7):
+                ack_partial = repository.delete_processed_products([101], chunk_started_at=123.0)
+            self.assertEqual(ack_partial.requested_products, 1)
+            self.assertEqual(ack_partial.deleted_products, 1)
+            self.assertEqual(ack_partial.deleted_artifacts, 0)
 
-            first_batch = repository.fetch_batch(limit=1, parser_name="fixprice")
-            self.assertEqual(len(first_batch), 1)
-            self.assertEqual(first_batch[0].sku, "sku-101")
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                remaining_products = conn.execute(
+                    "SELECT id FROM run_artifact_products ORDER BY id ASC"
+                ).fetchall()
+                self.assertEqual([int(row["id"]) for row in remaining_products], [102, 103])
+                artifact_11 = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM run_artifacts WHERE id = 11"
+                ).fetchone()
+                self.assertEqual(int(artifact_11["cnt"]), 1)
+                run_1_state = conn.execute(
+                    "SELECT converter_elapsed_sec, finish FROM task_runs WHERE id = ?",
+                    ("run-1",),
+                ).fetchone()
+                self.assertIsNotNone(run_1_state)
+                self.assertEqual(int(run_1_state["converter_elapsed_sec"] or 0), 7)
+                self.assertIsNone(run_1_state["finish"])
+            finally:
+                conn.close()
 
-            cursor_ingested_at = first_batch[0].observed_at.isoformat()
-            cursor_product_id = int(first_batch[0].payload.get("receiver_product_id", 0))
+            with patch.object(type(repository), "_elapsed_seconds_since", return_value=5):
+                ack_full = repository.delete_processed_products([102], chunk_started_at=124.0)
+            self.assertEqual(ack_full.requested_products, 1)
+            self.assertEqual(ack_full.deleted_products, 1)
+            self.assertEqual(ack_full.deleted_artifacts, 1)
 
-            second_batch = repository.fetch_batch(
-                limit=10,
-                parser_name="fixprice",
-                after_ingested_at=cursor_ingested_at,
-                after_product_id=cursor_product_id,
-            )
-            self.assertEqual(len(second_batch), 1)
-            self.assertEqual(second_batch[0].sku, "sku-102")
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                artifact_ids = conn.execute(
+                    "SELECT id FROM run_artifacts ORDER BY id ASC"
+                ).fetchall()
+                self.assertEqual([int(row["id"]) for row in artifact_ids], [12])
+
+                categories = conn.execute(
+                    "SELECT artifact_id FROM run_artifact_categories ORDER BY artifact_id ASC"
+                ).fetchall()
+                self.assertEqual([int(row["artifact_id"]) for row in categories], [12])
+
+                admin_units = conn.execute(
+                    "SELECT artifact_id FROM run_artifact_administrative_units ORDER BY artifact_id ASC"
+                ).fetchall()
+                self.assertEqual([int(row["artifact_id"]) for row in admin_units], [12])
+
+                run_1_state = conn.execute(
+                    "SELECT converter_elapsed_sec, finish FROM task_runs WHERE id = ?",
+                    ("run-1",),
+                ).fetchone()
+                self.assertIsNotNone(run_1_state)
+                self.assertEqual(int(run_1_state["converter_elapsed_sec"] or 0), 12)
+                self.assertIsNotNone(run_1_state["finish"])
+
+                run_keep_state = conn.execute(
+                    "SELECT converter_elapsed_sec, finish FROM task_runs WHERE id = ?",
+                    ("run-keep",),
+                ).fetchone()
+                self.assertIsNotNone(run_keep_state)
+                self.assertEqual(int(run_keep_state["converter_elapsed_sec"] or 0), 0)
+                self.assertIsNone(run_keep_state["finish"])
+
+                runs_count = conn.execute("SELECT COUNT(*) AS cnt FROM task_runs").fetchone()
+                tasks_count = conn.execute("SELECT COUNT(*) AS cnt FROM crawl_tasks").fetchone()
+                self.assertEqual(int(runs_count["cnt"]), 3)
+                self.assertEqual(int(tasks_count["cnt"]), 1)
+            finally:
+                conn.close()
         finally:
             db_path.unlink(missing_ok=True)
 

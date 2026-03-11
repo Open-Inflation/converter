@@ -335,16 +335,6 @@ class _CatalogProductAsset(_CatalogBase):
     )
 
 
-class _ConverterSyncState(_CatalogBase):
-    __tablename__ = "converter_sync_state"
-
-    state_key: Mapped[str] = mapped_column("key", String(191), primary_key=True)
-    value: Mapped[str | None] = mapped_column(Text, nullable=True)
-    cursor_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    cursor_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class _CatalogIngestStageProduct(_CatalogBase):
     __tablename__ = "catalog_ingest_stage_products"
 
@@ -429,7 +419,6 @@ __all__ = [
     "_CatalogSettlement",
     "_CatalogSettlementGeodata",
     "_CatalogStorageDeleteOutbox",
-    "_ConverterSyncState",
     "_as_float",
     "_is_missing",
     "_safe_str",

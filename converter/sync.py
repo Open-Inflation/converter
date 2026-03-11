@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import logging
+import math
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -17,7 +17,7 @@ from .adapters import (
     ReceiverSQLiteRepository,
     is_postgres_dsn,
 )
-from .core.models import RawProductRecord, SyncChunkV2
+from .core.models import AckResult, RawProductRecord, SyncChunkV2
 from .core.registry import HandlerRegistry
 from .parsers import register_builtin_handlers
 
@@ -42,40 +42,12 @@ class SyncBatchEvent:
     batch_number: int
     batch_size: int
     total_processed: int
-    cursor_ingested_at: str
-    cursor_product_id: int
 
 
 @dataclass(frozen=True, slots=True)
 class SyncOutcome:
     batches: int
     total_processed: int
-    cursor_ingested_at: str | None
-    cursor_product_id: int | None
-
-
-def _cursor_from_records(records: list[RawProductRecord]) -> tuple[str, int]:
-    max_ingested_at = ""
-    max_product_id = -1
-
-    for record in records:
-        observed_at = record.observed_at
-        if observed_at.tzinfo is None:
-            observed_at = observed_at.replace(tzinfo=timezone.utc)
-        ingested_at = observed_at.isoformat()
-
-        raw_product_id = record.payload.get("receiver_product_id") if isinstance(record.payload, dict) else None
-        product_id = _to_int(raw_product_id) or 0
-
-        if ingested_at > max_ingested_at or (ingested_at == max_ingested_at and product_id > max_product_id):
-            max_ingested_at = ingested_at
-            max_product_id = product_id
-
-    if not max_ingested_at:
-        now = datetime.now(tz=timezone.utc).isoformat()
-        return now, 0
-
-    return max_ingested_at, max_product_id
 
 
 def _to_int(value: object) -> int | None:
@@ -96,33 +68,66 @@ def _to_int(value: object) -> int | None:
 
 def _chunk_id(
     parser_name: str,
-    cursor_ingested_at: str,
-    cursor_product_id: int,
     records: list[RawProductRecord],
 ) -> str:
     if not records:
-        return f"{parser_name}:{cursor_ingested_at}:{cursor_product_id}:{uuid4().hex}"
+        return f"{parser_name}:{uuid4().hex}"
 
     source_tokens: list[str] = []
+    observed_tokens: list[str] = []
     for item in records:
         if item.source_id:
             source_tokens.append(item.source_id.strip())
+        observed_tokens.append(item.observed_at.isoformat())
     source_tokens = [token for token in source_tokens if token]
 
     first_source = source_tokens[0] if source_tokens else ""
     last_source = source_tokens[-1] if source_tokens else ""
+    first_observed = observed_tokens[0] if observed_tokens else ""
+    last_observed = observed_tokens[-1] if observed_tokens else ""
     seed = "|".join(
         (
             parser_name.strip().lower(),
-            cursor_ingested_at,
-            str(int(cursor_product_id)),
             str(len(records)),
             first_source,
             last_source,
+            first_observed,
+            last_observed,
         )
     )
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
-    return f"{parser_name.strip().lower()}:{cursor_ingested_at}:{cursor_product_id}:{digest}"
+    return f"{parser_name.strip().lower()}:{digest}"
+
+
+def _extract_receiver_product_ids(records: list[RawProductRecord]) -> list[int]:
+    unique_ids: list[int] = []
+    seen: set[int] = set()
+    invalid_rows = 0
+    for record in records:
+        raw_product_id = record.payload.get("receiver_product_id") if isinstance(record.payload, dict) else None
+        product_id = _to_int(raw_product_id)
+        if product_id is None or product_id <= 0:
+            invalid_rows += 1
+            continue
+        if product_id in seen:
+            continue
+        seen.add(product_id)
+        unique_ids.append(product_id)
+
+    if invalid_rows > 0:
+        raise RuntimeError(
+            "Receiver row is missing valid receiver_product_id for consume-delete flow: "
+            f"invalid_rows={invalid_rows} total_rows={len(records)}"
+        )
+    if not unique_ids:
+        raise RuntimeError("Receiver batch does not contain deletable receiver_product_id values")
+    return unique_ids
+
+
+def _as_ack_result(value: object) -> AckResult:
+    if isinstance(value, AckResult):
+        return value
+    raise RuntimeError("Receiver repository returned invalid delete ack payload")
 
 
 def build_receiver_repository(dsn_or_path: str) -> Any:
@@ -202,14 +207,9 @@ class ConverterSyncService:
         apply_chunk = getattr(catalog_repo, "apply_chunk", None)
         if not callable(apply_chunk):
             raise RuntimeError("Catalog repository does not support v2 apply_chunk API")
-
-        watermark_ingested_at, watermark_product_id = catalog_repo.get_receiver_cursor(parser_name)
-        LOGGER.info(
-            "Sync cursor loaded: parser=%s ingested_at=%s product_id=%s",
-            parser_name,
-            watermark_ingested_at,
-            watermark_product_id,
-        )
+        delete_processed_products = getattr(receiver_repo, "delete_processed_products", None)
+        if not callable(delete_processed_products):
+            raise RuntimeError("Receiver repository does not support consume-delete acknowledge API")
         total_processed = 0
         batches = 0
 
@@ -225,17 +225,15 @@ class ConverterSyncService:
 
             next_batch_number = batches + 1
             LOGGER.debug(
-                "Sync fetching batch: parser=%s batch_number=%s cursor_ingested_at=%s cursor_product_id=%s",
+                "Sync fetching batch: parser=%s batch_number=%s",
                 parser_name,
                 next_batch_number,
-                watermark_ingested_at,
-                watermark_product_id,
             )
-            raw_records = receiver_repo.fetch_batch(
-                limit=receiver_fetch_size,
-                parser_name=parser_name,
-                after_ingested_at=watermark_ingested_at,
-                after_product_id=watermark_product_id,
+            raw_records = list(
+                receiver_repo.fetch_batch(
+                    limit=receiver_fetch_size,
+                    parser_name=parser_name,
+                )
             )
             if not raw_records:
                 LOGGER.info(
@@ -254,6 +252,7 @@ class ConverterSyncService:
             )
             for chunk_start in range(0, len(raw_records), write_chunk_size):
                 raw_chunk = raw_records[chunk_start : chunk_start + write_chunk_size]
+                chunk_started_at = monotonic()
                 LOGGER.debug(
                     "Sync processing chunk: parser=%s batch_number=%s chunk_index=%s chunk_size=%s",
                     parser_name,
@@ -271,14 +270,12 @@ class ConverterSyncService:
                         (chunk_start // write_chunk_size) + 1,
                     )
                     raise
-                chunk_ingested_at, chunk_product_id = _cursor_from_records(raw_chunk)
+                receiver_product_ids = _extract_receiver_product_ids(raw_chunk)
 
                 chunk = SyncChunkV2(
                     parser_name=parser_name,
-                    chunk_id=_chunk_id(parser_name, chunk_ingested_at, chunk_product_id, raw_chunk),
+                    chunk_id=_chunk_id(parser_name, raw_chunk),
                     records=normalized,
-                    cursor_ingested_at=chunk_ingested_at,
-                    cursor_product_id=chunk_product_id,
                 )
                 outcome = apply_chunk(chunk)
                 LOGGER.debug(
@@ -291,27 +288,32 @@ class ConverterSyncService:
                     getattr(outcome, "upserted_products", None),
                     getattr(outcome, "elapsed_ms", None),
                 )
+                ack = _as_ack_result(
+                    delete_processed_products(
+                        receiver_product_ids,
+                        chunk_started_at=chunk_started_at,
+                    )
+                )
+                chunk_elapsed_seconds = max(0, int(math.ceil(monotonic() - chunk_started_at)))
                 LOGGER.debug(
-                    "Sync chunk committed: parser=%s batch_number=%s chunk_index=%s cursor_ingested_at=%s cursor_product_id=%s",
+                    "Sync chunk committed and acknowledged: parser=%s batch_number=%s chunk_index=%s deleted_products=%s deleted_artifacts=%s elapsed_seconds=%s",
                     parser_name,
                     next_batch_number,
                     (chunk_start // write_chunk_size) + 1,
-                    chunk_ingested_at,
-                    chunk_product_id,
+                    ack.deleted_products,
+                    ack.deleted_artifacts,
+                    chunk_elapsed_seconds,
                 )
-                watermark_ingested_at, watermark_product_id = chunk_ingested_at, chunk_product_id
 
             batches += 1
             total_processed += len(raw_records)
 
             LOGGER.info(
-                "Sync batch complete: parser=%s batch_number=%s batch_size=%s total_processed=%s cursor_ingested_at=%s cursor_product_id=%s",
+                "Sync batch complete: parser=%s batch_number=%s batch_size=%s total_processed=%s",
                 parser_name,
                 batches,
                 len(raw_records),
                 total_processed,
-                watermark_ingested_at,
-                watermark_product_id,
             )
             if on_batch is not None:
                 on_batch(
@@ -319,25 +321,19 @@ class ConverterSyncService:
                         batch_number=batches,
                         batch_size=len(raw_records),
                         total_processed=total_processed,
-                        cursor_ingested_at=watermark_ingested_at,
-                        cursor_product_id=watermark_product_id,
                     )
                 )
 
         outcome = SyncOutcome(
             batches=batches,
             total_processed=total_processed,
-            cursor_ingested_at=watermark_ingested_at,
-            cursor_product_id=watermark_product_id,
         )
         LOGGER.info(
-            "Sync finished: parser=%s batches=%s total_processed=%s elapsed_sec=%.3f final_cursor_ingested_at=%s final_cursor_product_id=%s",
+            "Sync finished: parser=%s batches=%s total_processed=%s elapsed_sec=%.3f",
             parser_name,
             outcome.batches,
             outcome.total_processed,
             monotonic() - started_at,
-            outcome.cursor_ingested_at,
-            outcome.cursor_product_id,
         )
         return outcome
 

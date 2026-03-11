@@ -68,8 +68,7 @@ def main() -> None:
 
     def _on_batch(event: SyncBatchEvent) -> None:
         print(
-            f"Batch {event.batch_number}: processed={event.batch_size} total={event.total_processed} "
-            f"cursor=({event.cursor_ingested_at}, {event.cursor_product_id})"
+            f"Batch {event.batch_number}: processed={event.batch_size} total={event.total_processed}"
         )
 
     result = service.run(

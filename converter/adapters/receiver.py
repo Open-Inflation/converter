@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+import math
 from pathlib import Path
+from time import monotonic
 from typing import Any
+from collections.abc import Sequence
 
-from sqlalchemy import and_, func, inspect, or_, select, text
+from sqlalchemy import delete, func, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from converter.core.models import RawProductRecord
+from converter.core.models import AckResult, RawProductRecord
 from .receiver_mapping import (
     _as_bool,
     _as_float,
     _as_int,
     _as_string_list,
-    _parse_datetime,
     _safe_str,
     map_receiver_row_to_raw_product,
 )
@@ -29,6 +31,7 @@ from .receiver_schema import (
     _RunArtifactProductImage,
     _RunArtifactProductMeta,
     _RunArtifactProductWholesalePrice,
+    _TaskRun,
 )
 
 
@@ -80,12 +83,8 @@ class ReceiverRepository:
         limit: int = 100,
         *,
         parser_name: str | None = None,
-        after_ingested_at: str | datetime | None = None,
-        after_product_id: int | None = None,
     ) -> list[RawProductRecord]:
         parser_filter = parser_name.strip().lower() if isinstance(parser_name, str) else None
-        watermark = self._normalize_watermark(after_ingested_at, dialect=self._engine.dialect.name)
-        after_id = int(after_product_id or 0)
 
         with self._session_factory() as session:
             stmt = (
@@ -103,17 +102,6 @@ class ReceiverRepository:
 
             if parser_filter:
                 stmt = stmt.where(func.lower(_RunArtifact.parser_name) == parser_filter)
-
-            if watermark is not None:
-                stmt = stmt.where(
-                    or_(
-                        _RunArtifact.ingested_at > watermark,
-                        and_(
-                            _RunArtifact.ingested_at == watermark,
-                            _RunArtifactProduct.id > after_id,
-                        ),
-                    )
-                )
 
             stmt = stmt.order_by(_RunArtifact.ingested_at.asc(), _RunArtifactProduct.id.asc()).limit(max(1, int(limit)))
             rows = session.execute(stmt).all()
@@ -279,6 +267,114 @@ class ReceiverRepository:
 
             return out
 
+    def delete_processed_products(
+        self,
+        product_ids: Sequence[int],
+        *,
+        chunk_started_at: float,
+    ) -> AckResult:
+        normalized_ids = self._normalize_product_ids(product_ids)
+        if not normalized_ids:
+            return AckResult(requested_products=0, deleted_products=0, deleted_artifacts=0)
+
+        with self._session_factory() as session:
+            product_rows = session.execute(
+                select(
+                    _RunArtifactProduct.id,
+                    _RunArtifactProduct.artifact_id,
+                    _RunArtifact.run_id,
+                )
+                .join(_RunArtifact, _RunArtifact.id == _RunArtifactProduct.artifact_id)
+                .where(_RunArtifactProduct.id.in_(normalized_ids))
+            ).all()
+            if not product_rows:
+                return AckResult(
+                    requested_products=len(normalized_ids),
+                    deleted_products=0,
+                    deleted_artifacts=0,
+                )
+
+            existing_product_ids = sorted({int(row.id) for row in product_rows})
+            touched_artifact_ids = sorted({int(row.artifact_id) for row in product_rows})
+            touched_run_counts: dict[str, int] = {}
+            for row in product_rows:
+                run_id = _safe_str(row.run_id)
+                if run_id is None:
+                    continue
+                touched_run_counts[run_id] = touched_run_counts.get(run_id, 0) + 1
+
+            session.execute(
+                delete(_RunArtifactProductImage).where(_RunArtifactProductImage.product_id.in_(existing_product_ids))
+            )
+            session.execute(
+                delete(_RunArtifactProductMeta).where(_RunArtifactProductMeta.product_id.in_(existing_product_ids))
+            )
+            session.execute(
+                delete(_RunArtifactProductWholesalePrice).where(
+                    _RunArtifactProductWholesalePrice.product_id.in_(existing_product_ids)
+                )
+            )
+            session.execute(
+                delete(_RunArtifactProductCategory).where(
+                    _RunArtifactProductCategory.product_id.in_(existing_product_ids)
+                )
+            )
+            session.execute(
+                delete(_RunArtifactProduct).where(_RunArtifactProduct.id.in_(existing_product_ids))
+            )
+
+            empty_artifact_ids = self._find_empty_artifacts(session, touched_artifact_ids)
+            if empty_artifact_ids:
+                session.execute(
+                    delete(_RunArtifactCategory).where(_RunArtifactCategory.artifact_id.in_(empty_artifact_ids))
+                )
+                session.execute(
+                    delete(_RunArtifactAdministrativeUnit).where(
+                        _RunArtifactAdministrativeUnit.artifact_id.in_(empty_artifact_ids)
+                    )
+                )
+                session.execute(
+                    delete(_RunArtifact).where(_RunArtifact.id.in_(empty_artifact_ids))
+                )
+
+            normalized_elapsed_seconds = self._elapsed_seconds_since(chunk_started_at)
+            elapsed_by_run = self._distribute_elapsed_seconds(normalized_elapsed_seconds, touched_run_counts)
+            if elapsed_by_run:
+                for run_id, delta in elapsed_by_run.items():
+                    if delta <= 0:
+                        continue
+                    session.execute(
+                        update(_TaskRun)
+                        .where(_TaskRun.id == run_id)
+                        .values(converter_elapsed_sec=func.coalesce(_TaskRun.converter_elapsed_sec, 0) + delta)
+                    )
+
+            finished_run_ids = self._find_finished_runs(session, tuple(touched_run_counts.keys()))
+            if finished_run_ids:
+                session.execute(
+                    update(_TaskRun)
+                    .where(_TaskRun.id.in_(finished_run_ids))
+                    .where(_TaskRun.finish.is_(None))
+                    .values(finish=datetime.now(tz=timezone.utc))
+                )
+
+            session.commit()
+            ack = AckResult(
+                requested_products=len(normalized_ids),
+                deleted_products=len(existing_product_ids),
+                deleted_artifacts=len(empty_artifact_ids),
+            )
+            LOGGER.debug(
+                "Receiver consume-delete acknowledged: requested_products=%s deleted_products=%s deleted_artifacts=%s elapsed_seconds=%s touched_runs=%s finished_runs=%s",
+                ack.requested_products,
+                ack.deleted_products,
+                ack.deleted_artifacts,
+                normalized_elapsed_seconds,
+                len(touched_run_counts),
+                len(finished_run_ids),
+            )
+            return ack
+
     def _ensure_read_indexes(self) -> None:
         dialect = self._engine.dialect.name
         if dialect not in {"postgresql", "sqlite"}:
@@ -339,6 +435,8 @@ class ReceiverRepository:
             raise RuntimeError("Receiver schema is missing table run_artifact_product_wholesale_prices")
         if not inspector.has_table("run_artifact_product_categories"):
             raise RuntimeError("Receiver schema is missing table run_artifact_product_categories")
+        if not inspector.has_table("task_runs"):
+            raise RuntimeError("Receiver schema is missing table task_runs")
 
         columns = {item["name"] for item in inspector.get_columns("run_artifacts")}
         if "parser_name" not in columns:
@@ -408,6 +506,14 @@ class ReceiverRepository:
         if "is_main" not in image_columns:
             raise RuntimeError(
                 "Unsupported receiver schema: run_artifact_product_images is missing column is_main"
+            )
+
+        task_run_columns = {item["name"] for item in inspector.get_columns("task_runs")}
+        missing_task_run = sorted({"converter_elapsed_sec", "finish"} - task_run_columns)
+        if missing_task_run:
+            raise RuntimeError(
+                "Unsupported receiver schema: task_runs is missing columns "
+                f"{', '.join(missing_task_run)}"
             )
 
     def _load_category_lookup(
@@ -659,30 +765,90 @@ class ReceiverRepository:
         return out
 
     @staticmethod
-    def _normalize_watermark(
-        value: str | datetime | None,
-        *,
-        dialect: str,
-    ) -> str | datetime | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value
-        token = _safe_str(value)
-        if token is None:
-            return None
-        if dialect != "postgresql":
-            return token
-        token = token.replace("Z", "+00:00")
+    def _normalize_product_ids(product_ids: Sequence[int]) -> list[int]:
+        out: list[int] = []
+        seen: set[int] = set()
+        for raw in product_ids:
+            value = _as_int(raw)
+            if value is None or value <= 0:
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            out.append(int(value))
+        return out
+
+    @staticmethod
+    def _find_empty_artifacts(session: Session, artifact_ids: Sequence[int]) -> list[int]:
+        if not artifact_ids:
+            return []
+        rows = session.execute(
+            select(_RunArtifact.id)
+            .where(_RunArtifact.id.in_(artifact_ids))
+            .where(
+                ~select(_RunArtifactProduct.id)
+                .where(_RunArtifactProduct.artifact_id == _RunArtifact.id)
+                .exists()
+            )
+        ).all()
+        return sorted({int(row.id) for row in rows})
+
+    @staticmethod
+    def _find_finished_runs(session: Session, run_ids: Sequence[str]) -> list[str]:
+        if not run_ids:
+            return []
+        existing_rows = session.execute(
+            select(_RunArtifact.run_id).where(_RunArtifact.run_id.in_(run_ids))
+        ).all()
+        existing_run_ids = {row.run_id for row in existing_rows if isinstance(row.run_id, str) and row.run_id}
+        return sorted({run_id for run_id in run_ids if run_id not in existing_run_ids})
+
+    @staticmethod
+    def _elapsed_seconds_since(chunk_started_at: float) -> int:
+        if isinstance(chunk_started_at, bool):
+            return 0
         try:
-            parsed = datetime.fromisoformat(token)
-        except ValueError:
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed
+            started = float(chunk_started_at)
+        except (TypeError, ValueError):
+            return 0
+        elapsed = monotonic() - started
+        if elapsed <= 0:
+            return 0
+        return int(math.ceil(elapsed))
+
+    @staticmethod
+    def _distribute_elapsed_seconds(
+        elapsed_seconds: int,
+        run_counts: dict[str, int],
+    ) -> dict[str, int]:
+        if elapsed_seconds <= 0 or not run_counts:
+            return {}
+
+        total_count = sum(max(0, int(count)) for count in run_counts.values())
+        if total_count <= 0:
+            return {}
+
+        allocations: dict[str, int] = {}
+        remainders: list[tuple[float, str]] = []
+        assigned = 0
+        for run_id in sorted(run_counts.keys()):
+            count = max(0, int(run_counts[run_id]))
+            if count == 0:
+                allocations[run_id] = 0
+                continue
+            quota = elapsed_seconds * count / total_count
+            whole = int(quota)
+            allocations[run_id] = whole
+            assigned += whole
+            remainders.append((quota - whole, run_id))
+
+        remaining = elapsed_seconds - assigned
+        if remaining > 0:
+            remainders.sort(key=lambda item: (-item[0], item[1]))
+            for _, run_id in remainders[:remaining]:
+                allocations[run_id] = allocations.get(run_id, 0) + 1
+
+        return allocations
 
 
 class ReceiverSQLiteRepository(ReceiverRepository):

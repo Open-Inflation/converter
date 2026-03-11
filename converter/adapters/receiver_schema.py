@@ -49,6 +49,17 @@ class _RunArtifact(_ReceiverBase):
     )
 
 
+class _TaskRun(_ReceiverBase):
+    __tablename__ = "task_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    converter_elapsed_sec: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    finish: Mapped[datetime | str | None] = mapped_column(
+        DateTime(timezone=True).with_variant(String(64), "sqlite"),
+        nullable=True,
+    )
+
+
 class _RunArtifactProduct(_ReceiverBase):
     __tablename__ = "run_artifact_products"
 
@@ -163,6 +174,7 @@ class _RunArtifactProductCategory(_ReceiverBase):
 __all__ = [
     "_ReceiverBase",
     "_RunArtifact",
+    "_TaskRun",
     "_RunArtifactAdministrativeUnit",
     "_RunArtifactCategory",
     "_RunArtifactProduct",

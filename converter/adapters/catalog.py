@@ -42,7 +42,6 @@ from .catalog_schema import (
     _CatalogSettlement,
     _CatalogSettlementGeodata,
     _CatalogStorageDeleteOutbox,
-    _ConverterSyncState,
     _as_float,
     _is_missing,
     _safe_str,
@@ -130,44 +129,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             monotonic() - started_at,
         )
 
-    def upsert_many_with_cursor(
-        self,
-        records: list[NormalizedProductRecord],
-        *,
-        parser_name: str,
-        cursor_ingested_at: str,
-        cursor_product_id: int,
-    ) -> None:
-        started_at = monotonic()
-        LOGGER.debug(
-            "Catalog upsert_many_with_cursor started: records=%s parser=%s cursor_ingested_at=%s cursor_product_id=%s",
-            len(records),
-            parser_name,
-            cursor_ingested_at,
-            cursor_product_id,
-        )
-
-        def _work(session: Session) -> None:
-            if records:
-                self._upsert_many_in_session(session, records)
-            self._set_receiver_cursor_in_session(
-                session,
-                parser_name,
-                ingested_at=cursor_ingested_at,
-                product_id=cursor_product_id,
-            )
-
-        self._run_write_transaction(
-            _work,
-            operation_name="upsert_many_with_cursor",
-        )
-        LOGGER.debug(
-            "Catalog upsert_many_with_cursor finished: records=%s parser=%s elapsed_sec=%.3f",
-            len(records),
-            parser_name,
-            monotonic() - started_at,
-        )
-
     def apply_chunk(self, chunk: SyncChunkV2) -> ChunkApplyResultV2:
         started_at = monotonic()
         counters = {
@@ -176,12 +137,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             "upserted_products": 0,
         }
         LOGGER.debug(
-            "Catalog apply_chunk started: parser=%s chunk_id=%s records=%s cursor_ingested_at=%s cursor_product_id=%s",
+            "Catalog apply_chunk started: parser=%s chunk_id=%s records=%s",
             chunk.parser_name,
             chunk.chunk_id,
             len(chunk.records),
-            chunk.cursor_ingested_at,
-            chunk.cursor_product_id,
         )
 
         def _work(session: Session) -> None:
@@ -242,12 +201,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     categories=categories,
                 )
 
-            self._set_receiver_cursor_in_session(
-                session,
-                chunk.parser_name,
-                ingested_at=chunk.cursor_ingested_at,
-                product_id=chunk.cursor_product_id,
-            )
             self._clear_stage_chunk_in_session(session, chunk.chunk_id)
 
         self._run_write_transaction(
@@ -271,69 +224,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             result.elapsed_ms,
         )
         return result
-
-    def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
-        with self._session_factory() as session:
-            key = self._cursor_key(parser_name)
-            row = session.get(_ConverterSyncState, key)
-            if row is None:
-                LOGGER.debug("Catalog cursor missing: parser=%s", parser_name)
-                return None, None
-
-            typed_ingested_at = getattr(row, "cursor_ingested_at", None)
-            typed_product_id = self._to_int(getattr(row, "cursor_product_id", None))
-            if typed_ingested_at is not None and typed_product_id is not None:
-                ingested_at = self._to_utc(typed_ingested_at).isoformat()
-                product_id = typed_product_id
-                LOGGER.debug(
-                    "Catalog cursor loaded: parser=%s ingested_at=%s product_id=%s",
-                    parser_name,
-                    ingested_at,
-                    product_id,
-                )
-                return ingested_at, product_id
-
-            token = _safe_str(row.value)
-            if token is None or "\t" not in token:
-                LOGGER.debug("Catalog cursor invalid format: parser=%s value=%s", parser_name, token)
-                return None, None
-            ingested_at_raw, product_id_raw = token.rsplit("\t", 1)
-            ingested_at = _safe_str(ingested_at_raw)
-            product_id = self._to_int(product_id_raw)
-            LOGGER.debug(
-                "Catalog cursor loaded: parser=%s ingested_at=%s product_id=%s",
-                parser_name,
-                ingested_at,
-                product_id,
-            )
-            return ingested_at, product_id
-
-    def set_receiver_cursor(
-        self,
-        parser_name: str,
-        *,
-        ingested_at: str,
-        product_id: int,
-    ) -> None:
-        LOGGER.debug(
-            "Catalog set_receiver_cursor requested: parser=%s ingested_at=%s product_id=%s",
-            parser_name,
-            ingested_at,
-            product_id,
-        )
-
-        def _work(session: Session) -> None:
-            self._set_receiver_cursor_in_session(
-                session,
-                parser_name,
-                ingested_at=ingested_at,
-                product_id=product_id,
-            )
-
-        self._run_write_transaction(
-            _work,
-            operation_name="set_receiver_cursor",
-        )
 
     def _run_write_transaction(
         self,
@@ -393,95 +283,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             if token:
                 return token.upper()
         return None
-
-    def _set_receiver_cursor_in_session(
-        self,
-        session: Session,
-        parser_name: str,
-        *,
-        ingested_at: str,
-        product_id: int,
-    ) -> None:
-        encoded = f"{ingested_at}\t{int(product_id)}"
-        parsed_ingested_at = self._parse_iso_datetime(ingested_at)
-        now = _utc_now()
-        key = self._cursor_key(parser_name)
-        row = session.get(_ConverterSyncState, key)
-        if row is None:
-            row = _ConverterSyncState(
-                state_key=key,
-                value=encoded,
-                cursor_ingested_at=parsed_ingested_at,
-                cursor_product_id=int(product_id),
-                updated_at=now,
-            )
-            session.add(row)
-            LOGGER.debug(
-                "Catalog cursor created: parser=%s ingested_at=%s product_id=%s",
-                parser_name,
-                ingested_at,
-                product_id,
-            )
-            return
-
-        current_ingested_at: str | None = None
-        current_product_id: int | None = None
-        token = _safe_str(row.value)
-        if token and "\t" in token:
-            current_ingested_at_raw, current_product_id_raw = token.rsplit("\t", 1)
-            current_ingested_at = _safe_str(current_ingested_at_raw)
-            current_product_id = self._to_int(current_product_id_raw)
-
-        if not self._is_cursor_after(
-            new_ingested_at=ingested_at,
-            new_product_id=product_id,
-            current_ingested_at=current_ingested_at,
-            current_product_id=current_product_id,
-        ):
-            LOGGER.debug(
-                "Catalog cursor update skipped (non-monotonic): parser=%s current=(%s,%s) new=(%s,%s)",
-                parser_name,
-                current_ingested_at,
-                current_product_id,
-                ingested_at,
-                product_id,
-            )
-            return
-
-        row.value = encoded
-        row.cursor_ingested_at = parsed_ingested_at
-        row.cursor_product_id = int(product_id)
-        row.updated_at = now
-        LOGGER.debug(
-            "Catalog cursor updated: parser=%s ingested_at=%s product_id=%s",
-            parser_name,
-            ingested_at,
-            product_id,
-        )
-
-    @staticmethod
-    def _is_cursor_after(
-        *,
-        new_ingested_at: str,
-        new_product_id: int,
-        current_ingested_at: str | None,
-        current_product_id: int | None,
-    ) -> bool:
-        if current_ingested_at is None:
-            return True
-        new_dt = CatalogRepository._parse_iso_datetime(new_ingested_at)
-        current_dt = CatalogRepository._parse_iso_datetime(current_ingested_at)
-        if new_dt is not None and current_dt is not None:
-            if new_dt > current_dt:
-                return True
-            if new_dt < current_dt:
-                return False
-            return int(new_product_id) > int(current_product_id or 0)
-        if new_ingested_at > current_ingested_at:
-            return True
-        if new_ingested_at < current_ingested_at:
-            return False
-        return int(new_product_id) > int(current_product_id or 0)
 
     def _upsert_many_in_session(
         self,
@@ -1930,26 +1731,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         return f"generated:{canonical}:{CatalogRepository._to_utc(record.observed_at).isoformat()}"
 
     @staticmethod
-    def _cursor_key(parser_name: str) -> str:
-        return f"receiver_cursor:{parser_name.strip().lower()}"
-
-    @staticmethod
     def _to_utc(value: datetime) -> datetime:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
-
-    @staticmethod
-    def _parse_iso_datetime(value: str) -> datetime | None:
-        token = _safe_str(value)
-        if token is None:
-            return None
-        normalized = token.replace("Z", "+00:00")
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-        return CatalogRepository._to_utc(parsed)
 
     @staticmethod
     def _max_datetime(left: datetime, right: datetime) -> datetime:

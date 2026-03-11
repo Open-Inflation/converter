@@ -29,8 +29,6 @@ class _FakeSyncService:
         return SyncOutcome(
             batches=1,
             total_processed=7,
-            cursor_ingested_at=None,
-            cursor_product_id=None,
         )
 
     def process_storage_delete_outbox(self, catalog_db: str, *, limit: int = 200) -> dict[str, int]:

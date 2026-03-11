@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Protocol
 from collections.abc import Sequence
 
-from .models import ChunkApplyResultV2, RawProductRecord, SyncChunkV2
+from .models import AckResult, ChunkApplyResultV2, RawProductRecord, SyncChunkV2
 
 
 class ReceiverRepository(Protocol):
@@ -13,17 +13,20 @@ class ReceiverRepository(Protocol):
         limit: int = 100,
         *,
         parser_name: str | None = None,
-        after_ingested_at: str | None = None,
-        after_product_id: int | None = None,
     ) -> Iterable[RawProductRecord]:
+        raise NotImplementedError
+
+    def delete_processed_products(
+        self,
+        product_ids: Sequence[int],
+        *,
+        chunk_started_at: float,
+    ) -> AckResult:
         raise NotImplementedError
 
 
 class CatalogWriteRepositoryV2(Protocol):
     def apply_chunk(self, chunk: SyncChunkV2) -> ChunkApplyResultV2:
-        raise NotImplementedError
-
-    def get_receiver_cursor(self, parser_name: str) -> tuple[str | None, int | None]:
         raise NotImplementedError
 
 
