@@ -285,16 +285,6 @@ class _CatalogCategory(_CatalogBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class _CatalogProductCategoryLink(_CatalogBase):
-    __tablename__ = "catalog_product_category_links"
-
-    snapshot_id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
-    category_id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True)
-    sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class _CatalogIdentityMap(_CatalogBase):
     __tablename__ = "catalog_identity_map"
 
@@ -413,7 +403,6 @@ __all__ = [
     "_CatalogIngestStageProduct",
     "_CatalogProduct",
     "_CatalogProductAsset",
-    "_CatalogProductCategoryLink",
     "_CatalogProductSnapshot",
     "_CatalogProductSource",
     "_CatalogSettlement",

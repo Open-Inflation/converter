@@ -52,7 +52,6 @@ converter/
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
 - `catalog_settlement_geodata` - история геоточек (`lat/lon`) по settlement.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent).
-- `catalog_product_category_links` - связи snapshot -> category.
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
 - `catalog_product_assets` - массивные поля текущей проекции товара (image urls, duplicates, fingerprints) в нормализованном виде.
 

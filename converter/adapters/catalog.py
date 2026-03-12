@@ -36,7 +36,6 @@ from .catalog_schema import (
     _CatalogIngestStageProduct,
     _CatalogProduct,
     _CatalogProductAsset,
-    _CatalogProductCategoryLink,
     _CatalogProductSnapshot,
     _CatalogProductSource,
     _CatalogSettlement,
@@ -180,7 +179,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     )
                     if inserted:
                         counters["inserted_snapshots"] += 1
-                    self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
                     self._upsert_product_source(
                         session,
                         record,
@@ -323,7 +321,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     snapshot_fingerprint=snapshot_fingerprint,
                     source_event_uid=source_event_uid,
                 )
-                self._link_snapshot_categories(session, snapshot=snapshot, categories=categories)
                 self._upsert_product_source(
                     session,
                     record,
@@ -1285,43 +1282,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return normalized
         return self._normalize_text(token)
 
-    def _link_snapshot_categories(
-        self,
-        session: Session,
-        *,
-        snapshot: _CatalogProductSnapshot,
-        categories: list[tuple[_CatalogCategory, int]],
-    ) -> None:
-        if snapshot.id is None or not categories:
-            return
-
-        if any(category.id is None for category, _ in categories):
-            session.flush()
-
-        seen: set[int] = set()
-        now = _utc_now()
-        for idx, (category, sort_order) in enumerate(categories):
-            if category.id is None or category.id in seen:
-                continue
-            seen.add(category.id)
-
-            key = (int(snapshot.id), int(category.id))
-            link = session.get(_CatalogProductCategoryLink, key)
-            if link is None:
-                link = _CatalogProductCategoryLink(
-                    snapshot_id=key[0],
-                    category_id=key[1],
-                    sort_order=sort_order,
-                    is_primary=(idx == 0),
-                    created_at=now,
-                )
-                session.add(link)
-            else:
-                if link.sort_order is None:
-                    link.sort_order = sort_order
-                if idx == 0:
-                    link.is_primary = True
-
     def _extract_geo_components(
         self,
         record: NormalizedProductRecord,
@@ -1506,6 +1466,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     ) -> None:
         now = _utc_now()
         source_id = self._source_id(record)
+        if any(category.id is None for category, _ in categories):
+            session.flush()
         primary_category_id = self._primary_category_id(categories)
         settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
 

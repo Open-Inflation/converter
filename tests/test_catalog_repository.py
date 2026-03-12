@@ -902,8 +902,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(category_rows[0]["source_uid"], "cat-root")
                 self.assertEqual(category_rows[1]["source_uid"], "cat-plates")
 
-                link_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_product_category_links").fetchone()
-                self.assertEqual(int(link_rows["cnt"]), 2)
+                legacy_table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='catalog_product_category_links'"
+                ).fetchone()
+                self.assertIsNone(legacy_table)
             finally:
                 conn.close()
         finally:
