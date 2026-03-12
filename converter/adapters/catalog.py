@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ from sqlalchemy import (
     insert,
     select,
     text,
+    tuple_,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -31,9 +33,6 @@ from .catalog_schema import (
     _CatalogCategory,
     _CatalogIdentityMap,
     _CatalogImageFingerprint,
-    _CatalogIngestStageAsset,
-    _CatalogIngestStageCategory,
-    _CatalogIngestStageProduct,
     _CatalogProduct,
     _CatalogProductAsset,
     _CatalogProductSnapshot,
@@ -47,6 +46,16 @@ from .catalog_schema import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _PreparedChunkRecord:
+    record: NormalizedProductRecord
+    parser_name: str
+    source_id: str
+    payload: dict[str, Any]
+    snapshot_fingerprint: str
+    source_event_uid: str
 
 
 class CatalogRepository(_CatalogSchemaMigrationMixin):
@@ -142,57 +151,55 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         )
 
         def _work(session: Session) -> None:
-            self._stage_chunk_in_session(session, chunk)
-            for record in chunk.records:
-                counters["upserted_products"] += 1
-                canonical_product_id = self._resolve_canonical_product_id(session, record)
-                record.canonical_product_id = canonical_product_id
+            prepared_records = self._prepare_chunk_records(session, chunk.records)
+            self._prime_apply_chunk_caches(session, prepared_records)
+            self._enable_asset_batch_mode(session)
+            try:
+                for prepared in prepared_records:
+                    record = prepared.record
+                    counters["upserted_products"] += 1
 
-                self._apply_persistent_image_dedup(session, record)
-                payload = self._source_payload(record)
-                snapshot_fingerprint = self._snapshot_content_fingerprint(record, payload=payload)
-                source_event_uid = self._source_event_uid(record, payload=payload)
-
-                touched_snapshot = self._touch_latest_snapshot_if_unchanged(
-                    session,
-                    record,
-                    snapshot_fingerprint=snapshot_fingerprint,
-                )
-                settlement = self._upsert_settlement(session, record, payload=payload)
-                categories = self._upsert_categories(session, record, payload=payload)
-
-                if touched_snapshot:
-                    counters["reused_snapshots"] += 1
-                    self._update_source_fingerprint_in_session(
-                        session,
-                        record=record,
-                        snapshot_fingerprint=snapshot_fingerprint,
-                    )
-                else:
-                    snapshot, inserted = self._insert_product_snapshot(
+                    touched_snapshot = self._touch_latest_snapshot_if_unchanged(
                         session,
                         record,
-                        payload=payload,
-                        snapshot_fingerprint=snapshot_fingerprint,
-                        source_event_uid=source_event_uid,
+                        snapshot_fingerprint=prepared.snapshot_fingerprint,
                     )
-                    if inserted:
-                        counters["inserted_snapshots"] += 1
-                    self._upsert_product_source(
+                    settlement = self._upsert_settlement(session, record, payload=prepared.payload)
+                    categories = self._upsert_categories(session, record, payload=prepared.payload)
+
+                    if touched_snapshot:
+                        counters["reused_snapshots"] += 1
+                        self._update_source_fingerprint_in_session(
+                            session,
+                            record=record,
+                            snapshot_fingerprint=prepared.snapshot_fingerprint,
+                        )
+                    else:
+                        snapshot, inserted = self._insert_product_snapshot(
+                            session,
+                            record,
+                            payload=prepared.payload,
+                            snapshot_fingerprint=prepared.snapshot_fingerprint,
+                            source_event_uid=prepared.source_event_uid,
+                        )
+                        if inserted:
+                            counters["inserted_snapshots"] += 1
+                        self._upsert_product_source(
+                            session,
+                            record,
+                            snapshot=snapshot,
+                            snapshot_fingerprint=prepared.snapshot_fingerprint,
+                        )
+
+                    self._upsert_product_row(
                         session,
                         record,
-                        snapshot=snapshot,
-                        snapshot_fingerprint=snapshot_fingerprint,
+                        settlement=settlement,
+                        categories=categories,
                     )
-
-                self._upsert_product_row(
-                    session,
-                    record,
-                    settlement=settlement,
-                    categories=categories,
-                )
-
-            self._clear_stage_chunk_in_session(session, chunk.chunk_id)
+                self._flush_buffered_product_assets(session)
+            finally:
+                self._disable_asset_batch_mode(session)
 
         self._run_write_transaction(
             _work,
@@ -215,6 +222,323 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             result.elapsed_ms,
         )
         return result
+
+    def _prepare_chunk_records(
+        self,
+        session: Session,
+        records: list[NormalizedProductRecord],
+    ) -> list[_PreparedChunkRecord]:
+        self._prime_identity_map_cache(session, records)
+        prepared: list[_PreparedChunkRecord] = []
+        for record in records:
+            canonical_product_id = self._resolve_canonical_product_id(session, record)
+            record.canonical_product_id = canonical_product_id
+
+            self._apply_persistent_image_dedup(session, record)
+            payload = self._source_payload(record)
+            prepared.append(
+                _PreparedChunkRecord(
+                    record=record,
+                    parser_name=record.parser_name.strip().lower(),
+                    source_id=self._source_id(record),
+                    payload=payload,
+                    snapshot_fingerprint=self._snapshot_content_fingerprint(record, payload=payload),
+                    source_event_uid=self._source_event_uid(record, payload=payload),
+                )
+            )
+        return prepared
+
+    def _prime_identity_map_cache(
+        self,
+        session: Session,
+        records: list[NormalizedProductRecord],
+    ) -> None:
+        identity_keys: set[tuple[str, str, str]] = set()
+        for record in records:
+            parser_name = record.parser_name.strip().lower()
+            for identity_type, identity_value in record.identity_candidates():
+                token = _safe_str(identity_value)
+                if token is None:
+                    continue
+                identity_keys.add((parser_name, identity_type, token))
+            fallback_identity = self._fallback_identity_value(record)
+            if fallback_identity is not None:
+                identity_keys.add((parser_name, "normalized_name", fallback_identity))
+
+        key_list = sorted(identity_keys)
+        cache: dict[tuple[str, str, str], _CatalogIdentityMap | None] = {
+            key: None for key in key_list
+        }
+        if key_list:
+            rows = session.scalars(
+                select(_CatalogIdentityMap).where(
+                    tuple_(
+                        _CatalogIdentityMap.parser_name,
+                        _CatalogIdentityMap.identity_type,
+                        _CatalogIdentityMap.identity_value,
+                    ).in_(key_list)
+                )
+            ).all()
+            for row in rows:
+                cache[(row.parser_name, row.identity_type, row.identity_value)] = row
+        session.info["_catalog_identity_cache"] = cache
+
+    def _prime_apply_chunk_caches(
+        self,
+        session: Session,
+        prepared_records: list[_PreparedChunkRecord],
+    ) -> None:
+        source_keys = sorted({(item.parser_name, item.source_id) for item in prepared_records})
+        source_cache: dict[tuple[str, str], _CatalogProductSource | None] = {
+            key: None for key in source_keys
+        }
+        if source_keys:
+            rows = session.scalars(
+                select(_CatalogProductSource).where(
+                    tuple_(_CatalogProductSource.parser_name, _CatalogProductSource.source_id).in_(source_keys)
+                )
+            ).all()
+            for row in rows:
+                source_cache[(row.parser_name, row.source_id)] = row
+        session.info["_catalog_product_source_cache"] = source_cache
+
+        product_cache: dict[tuple[str, str], _CatalogProduct | None] = {
+            key: None for key in source_keys
+        }
+        if source_keys:
+            product_rows = session.scalars(
+                select(_CatalogProduct).where(
+                    tuple_(_CatalogProduct.parser_name, _CatalogProduct.source_id).in_(source_keys)
+                )
+            ).all()
+            for row in product_rows:
+                product_cache[(row.parser_name.strip().lower(), row.source_id)] = row
+        session.info["_catalog_product_cache"] = product_cache
+
+        latest_snapshot_ids = sorted(
+            {
+                int(source.latest_snapshot_id)
+                for source in source_cache.values()
+                if isinstance(source, _CatalogProductSource) and source.latest_snapshot_id is not None
+            }
+        )
+        snapshot_id_cache: dict[int, _CatalogProductSnapshot | None] = {
+            snapshot_id: None for snapshot_id in latest_snapshot_ids
+        }
+        if latest_snapshot_ids:
+            snapshot_rows = session.scalars(
+                select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.id.in_(latest_snapshot_ids))
+            ).all()
+            for row in snapshot_rows:
+                snapshot_id_cache[int(row.id)] = row
+        session.info["_catalog_snapshot_id_cache"] = snapshot_id_cache
+
+        event_uids = sorted(
+            {item.source_event_uid for item in prepared_records if _safe_str(item.source_event_uid) is not None}
+        )
+        snapshot_event_cache: dict[str, _CatalogProductSnapshot | None] = {
+            event_uid: None for event_uid in event_uids
+        }
+        if event_uids:
+            event_rows = session.scalars(
+                select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.source_event_uid.in_(event_uids))
+            ).all()
+            for row in event_rows:
+                event_uid = _safe_str(row.source_event_uid)
+                if event_uid is not None:
+                    snapshot_event_cache[event_uid] = row
+        session.info["_catalog_snapshot_event_cache"] = snapshot_event_cache
+
+        settlement_keys_set: set[str] = set()
+        for item in prepared_records:
+            geo = self._extract_geo_components(item.record, payload=item.payload)
+            if geo is None:
+                continue
+            key = self._geo_key(geo)
+            if key is not None:
+                settlement_keys_set.add(key)
+        settlement_keys = sorted(settlement_keys_set)
+        settlement_cache: dict[str, _CatalogSettlement | None] = {key: None for key in settlement_keys}
+        if settlement_keys:
+            settlement_rows = session.scalars(
+                select(_CatalogSettlement).where(_CatalogSettlement.geo_key.in_(settlement_keys))
+            ).all()
+            for row in settlement_rows:
+                settlement_cache[row.geo_key] = row
+        session.info["_catalog_settlement_cache"] = settlement_cache
+
+        category_keys: set[str] = set()
+        for item in prepared_records:
+            for candidate in self._extract_category_candidates(item.record, payload=item.payload):
+                source_uid = _safe_str(candidate.get("uid"))
+                title = _safe_str(candidate.get("title"))
+                title_normalized = self._normalize_category_title(title)
+                key = self._category_key(
+                    parser_name=item.parser_name,
+                    source_uid=source_uid,
+                    title_normalized=title_normalized,
+                )
+                if key is not None:
+                    category_keys.add(key)
+        category_key_list = sorted(category_keys)
+        category_cache: dict[str, _CatalogCategory | None] = {key: None for key in category_key_list}
+        if category_key_list:
+            category_rows = session.scalars(
+                select(_CatalogCategory).where(_CatalogCategory.category_key.in_(category_key_list))
+            ).all()
+            for row in category_rows:
+                category_cache[row.category_key] = row
+        session.info["_catalog_category_cache"] = category_cache
+
+    @staticmethod
+    def _enable_asset_batch_mode(session: Session) -> None:
+        session.info["_catalog_asset_batch_mode"] = True
+        session.info["_catalog_asset_replace_buffer"] = {}
+
+    @staticmethod
+    def _disable_asset_batch_mode(session: Session) -> None:
+        session.info.pop("_catalog_asset_batch_mode", None)
+        session.info.pop("_catalog_asset_replace_buffer", None)
+
+    @staticmethod
+    def _asset_batch_mode_enabled(session: Session) -> bool:
+        return bool(session.info.get("_catalog_asset_batch_mode"))
+
+    def _flush_buffered_product_assets(self, session: Session) -> None:
+        buffered = session.info.get("_catalog_asset_replace_buffer")
+        if not isinstance(buffered, dict) or not buffered:
+            return
+
+        product_ids = sorted({int(product_id) for product_id in buffered.keys()})
+        if product_ids:
+            session.execute(
+                delete(_CatalogProductAsset).where(_CatalogProductAsset.product_id.in_(product_ids))
+            )
+
+        rows: list[dict[str, Any]] = []
+        for bucket in buffered.values():
+            if not isinstance(bucket, list):
+                continue
+            rows.extend(bucket)
+        if rows:
+            session.execute(insert(_CatalogProductAsset), rows)
+
+        buffered.clear()
+
+    @staticmethod
+    def _get_cached_product_source(
+        session: Session,
+        *,
+        parser_name: str,
+        source_id: str,
+    ) -> _CatalogProductSource | None:
+        key = (parser_name, source_id)
+        cached = session.info.get("_catalog_product_source_cache")
+        if isinstance(cached, dict) and key in cached:
+            value = cached[key]
+            return value if isinstance(value, _CatalogProductSource) else None
+        row = session.get(_CatalogProductSource, key)
+        if isinstance(cached, dict):
+            cached[key] = row
+        return row
+
+    @staticmethod
+    def _cache_product_source(
+        session: Session,
+        *,
+        parser_name: str,
+        source_id: str,
+        row: _CatalogProductSource | None,
+    ) -> None:
+        cached = session.info.get("_catalog_product_source_cache")
+        if isinstance(cached, dict):
+            cached[(parser_name, source_id)] = row
+
+    @staticmethod
+    def _get_cached_product_row(
+        session: Session,
+        *,
+        parser_name: str,
+        source_id: str,
+    ) -> _CatalogProduct | None:
+        key = (parser_name, source_id)
+        cached = session.info.get("_catalog_product_cache")
+        if isinstance(cached, dict) and key in cached:
+            value = cached[key]
+            return value if isinstance(value, _CatalogProduct) else None
+        row = session.scalar(
+            select(_CatalogProduct).where(
+                _CatalogProduct.parser_name == parser_name,
+                _CatalogProduct.source_id == source_id,
+            )
+        )
+        if isinstance(cached, dict):
+            cached[key] = row
+        return row
+
+    @staticmethod
+    def _cache_product_row(
+        session: Session,
+        *,
+        parser_name: str,
+        source_id: str,
+        row: _CatalogProduct | None,
+    ) -> None:
+        cached = session.info.get("_catalog_product_cache")
+        if isinstance(cached, dict):
+            cached[(parser_name, source_id)] = row
+
+    @staticmethod
+    def _get_cached_snapshot_by_id(
+        session: Session,
+        snapshot_id: int,
+    ) -> _CatalogProductSnapshot | None:
+        cached = session.info.get("_catalog_snapshot_id_cache")
+        if isinstance(cached, dict) and snapshot_id in cached:
+            value = cached[snapshot_id]
+            return value if isinstance(value, _CatalogProductSnapshot) else None
+        row = session.get(_CatalogProductSnapshot, snapshot_id)
+        if isinstance(cached, dict):
+            cached[snapshot_id] = row
+        return row
+
+    @staticmethod
+    def _cache_snapshot_by_id(
+        session: Session,
+        snapshot_id: int,
+        row: _CatalogProductSnapshot | None,
+    ) -> None:
+        cached = session.info.get("_catalog_snapshot_id_cache")
+        if isinstance(cached, dict):
+            cached[snapshot_id] = row
+
+    @staticmethod
+    def _get_cached_snapshot_by_event_uid(
+        session: Session,
+        *,
+        event_uid: str,
+    ) -> _CatalogProductSnapshot | None:
+        cached = session.info.get("_catalog_snapshot_event_cache")
+        if isinstance(cached, dict) and event_uid in cached:
+            value = cached[event_uid]
+            return value if isinstance(value, _CatalogProductSnapshot) else None
+        row = session.scalar(
+            select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.source_event_uid == event_uid)
+        )
+        if isinstance(cached, dict):
+            cached[event_uid] = row
+        return row
+
+    @staticmethod
+    def _cache_snapshot_by_event_uid(
+        session: Session,
+        *,
+        event_uid: str,
+        row: _CatalogProductSnapshot | None,
+    ) -> None:
+        cached = session.info.get("_catalog_snapshot_event_cache")
+        if isinstance(cached, dict):
+            cached[event_uid] = row
 
     def _run_write_transaction(
         self,
@@ -327,89 +651,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 categories=categories,
             )
         LOGGER.debug("Catalog session upsert completed: records=%s", len(records))
-
-    def _stage_chunk_in_session(self, session: Session, chunk: SyncChunkV2) -> None:
-        self._clear_stage_chunk_in_session(session, chunk.chunk_id)
-
-        now = _utc_now()
-        product_rows: list[dict[str, Any]] = []
-        asset_rows: list[dict[str, Any]] = []
-        category_rows: list[dict[str, Any]] = []
-
-        for row_no, record in enumerate(chunk.records):
-            payload = self._source_payload(record)
-            source_id = self._source_id(record)
-            product_rows.append(
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "row_no": int(row_no),
-                    "parser_name": record.parser_name,
-                    "source_id": source_id,
-                    "canonical_product_id": _safe_str(record.canonical_product_id),
-                    "content_fingerprint": self._snapshot_content_fingerprint(record, payload=payload),
-                    "source_event_uid": self._source_event_uid(record, payload=payload),
-                    "observed_at": self._to_utc(record.observed_at),
-                    "receiver_product_id": self._to_int(payload.get("receiver_product_id")),
-                    "receiver_artifact_id": self._to_int(payload.get("receiver_artifact_id")),
-                    "created_at": now,
-                }
-            )
-
-            for asset_kind, values in self._iter_asset_values(record):
-                for idx, value in enumerate(values):
-                    asset_rows.append(
-                        {
-                            "chunk_id": chunk.chunk_id,
-                            "parser_name": record.parser_name,
-                            "source_id": source_id,
-                            "asset_kind": asset_kind,
-                            "sort_order": int(idx),
-                            "value": str(value),
-                            "created_at": now,
-                        }
-                    )
-
-            candidates = self._extract_category_candidates(record, payload=payload)
-            for idx, item in enumerate(candidates):
-                category_rows.append(
-                    {
-                        "chunk_id": chunk.chunk_id,
-                        "parser_name": record.parser_name,
-                        "source_id": source_id,
-                        "uid": _safe_str(item.get("uid")),
-                        "title": _safe_str(item.get("title")),
-                        "parent_uid": _safe_str(item.get("parent_uid")),
-                        "depth": self._to_int(item.get("depth")),
-                        "sort_order": self._to_int(item.get("sort_order")) or int(idx),
-                        "alias": _safe_str(item.get("alias")),
-                        "created_at": now,
-                    }
-                )
-
-        if product_rows:
-            session.execute(insert(_CatalogIngestStageProduct), product_rows)
-        if asset_rows:
-            session.execute(insert(_CatalogIngestStageAsset), asset_rows)
-        if category_rows:
-            session.execute(insert(_CatalogIngestStageCategory), category_rows)
-        LOGGER.debug(
-            "Catalog chunk staged: chunk_id=%s products=%s assets=%s categories=%s",
-            chunk.chunk_id,
-            len(product_rows),
-            len(asset_rows),
-            len(category_rows),
-        )
-
-    def _clear_stage_chunk_in_session(self, session: Session, chunk_id: str) -> None:
-        session.execute(
-            delete(_CatalogIngestStageAsset).where(_CatalogIngestStageAsset.chunk_id == chunk_id)
-        )
-        session.execute(
-            delete(_CatalogIngestStageCategory).where(_CatalogIngestStageCategory.chunk_id == chunk_id)
-        )
-        session.execute(
-            delete(_CatalogIngestStageProduct).where(_CatalogIngestStageProduct.chunk_id == chunk_id)
-        )
 
     @staticmethod
     def _create_engine(database_url: str) -> Engine:
@@ -538,7 +779,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     ) -> None:
         parser_name = record.parser_name.strip().lower()
         source_id = self._source_id(record)
-        row = session.get(_CatalogProductSource, (parser_name, source_id))
+        row = self._get_cached_product_source(
+            session,
+            parser_name=parser_name,
+            source_id=source_id,
+        )
         if row is None:
             return
         if _is_missing(row.latest_content_fingerprint):
@@ -553,7 +798,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     ) -> bool:
         parser_name = record.parser_name.strip().lower()
         source_id = self._source_id(record)
-        source = session.get(_CatalogProductSource, (parser_name, source_id))
+        source = self._get_cached_product_source(
+            session,
+            parser_name=parser_name,
+            source_id=source_id,
+        )
         if source is None or source.latest_snapshot_id is None:
             return False
 
@@ -561,7 +810,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if latest_source_fingerprint is not None and latest_source_fingerprint != snapshot_fingerprint:
             return False
 
-        snapshot = session.get(_CatalogProductSnapshot, int(source.latest_snapshot_id))
+        snapshot = self._get_cached_snapshot_by_id(session, int(source.latest_snapshot_id))
         if snapshot is None:
             return False
 
@@ -588,11 +837,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         source.latest_content_fingerprint = snapshot_fingerprint
         source.updated_at = now
 
-        projection = session.scalar(
-            select(_CatalogProduct).where(
-                _CatalogProduct.parser_name == record.parser_name,
-                _CatalogProduct.source_id == source_id,
-            )
+        projection = self._get_cached_product_row(
+            session,
+            parser_name=record.parser_name,
+            source_id=source_id,
         )
         if projection is not None:
             projection.observed_at = self._max_datetime(projection.observed_at, observed_at)
@@ -628,6 +876,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             if _is_missing(row.canonical_product_id):
                 row.canonical_product_id = canonical_product_id
             row.updated_at = updated_at
+            identity_cache = session.info.get("_catalog_identity_cache")
+            if isinstance(identity_cache, dict):
+                identity_cache[(parser_name, identity_type, identity_value)] = row
             return row
 
         pk = {
@@ -659,17 +910,26 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         else:
             row = _CatalogIdentityMap(**values)
             session.add(row)
+            identity_cache = session.info.get("_catalog_identity_cache")
+            if isinstance(identity_cache, dict):
+                identity_cache[(parser_name, identity_type, identity_value)] = row
             return row
 
         row = session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
         if row is None:
             row = _CatalogIdentityMap(**values)
             session.add(row)
+            identity_cache = session.info.get("_catalog_identity_cache")
+            if isinstance(identity_cache, dict):
+                identity_cache[(parser_name, identity_type, identity_value)] = row
             return row
 
         if _is_missing(row.canonical_product_id):
             row.canonical_product_id = canonical_product_id
         row.updated_at = updated_at
+        identity_cache = session.info.get("_catalog_identity_cache")
+        if isinstance(identity_cache, dict):
+            identity_cache[(parser_name, identity_type, identity_value)] = row
         return row
 
     @staticmethod
@@ -680,6 +940,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         identity_type: str,
         identity_value: str,
     ) -> _CatalogIdentityMap | None:
+        cache_key = (parser_name, identity_type, identity_value)
+        identity_cache = session.info.get("_catalog_identity_cache")
+        if isinstance(identity_cache, dict) and cache_key in identity_cache:
+            cached = identity_cache[cache_key]
+            return cached if isinstance(cached, _CatalogIdentityMap) else None
+
         for pending in session.new:
             if not isinstance(pending, _CatalogIdentityMap):
                 continue
@@ -688,8 +954,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 and pending.identity_type == identity_type
                 and pending.identity_value == identity_value
             ):
+                if isinstance(identity_cache, dict):
+                    identity_cache[cache_key] = pending
                 return pending
-        return session.get(_CatalogIdentityMap, (parser_name, identity_type, identity_value))
+        row = session.get(_CatalogIdentityMap, cache_key)
+        if isinstance(identity_cache, dict):
+            identity_cache[cache_key] = row
+        return row
 
     @staticmethod
     def _fallback_identity_value(record: NormalizedProductRecord) -> str | None:
@@ -941,8 +1212,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         event_uid = _safe_str(source_event_uid)
 
         if event_uid is not None:
-            existing = session.scalar(
-                select(_CatalogProductSnapshot).where(_CatalogProductSnapshot.source_event_uid == event_uid)
+            existing = self._get_cached_snapshot_by_event_uid(
+                session,
+                event_uid=event_uid,
             )
             if existing is not None:
                 if existing.valid_to_at is None:
@@ -954,6 +1226,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 existing.loyal_price = record.loyal_price
                 existing.price_unit = record.price_unit
                 existing.available_count = record.available_count
+                if existing.id is not None:
+                    self._cache_snapshot_by_id(session, int(existing.id), existing)
                 return existing, False
 
         snapshot = _CatalogProductSnapshot(
@@ -978,6 +1252,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         )
         session.add(snapshot)
         session.flush([snapshot])
+        if snapshot.id is not None:
+            self._cache_snapshot_by_id(session, int(snapshot.id), snapshot)
+        if event_uid is not None:
+            self._cache_snapshot_by_event_uid(
+                session,
+                event_uid=event_uid,
+                row=snapshot,
+            )
         return snapshot, True
 
     def _upsert_product_source(
@@ -993,7 +1275,11 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         observed_at = self._to_utc(record.observed_at)
         now = _utc_now()
 
-        row = session.get(_CatalogProductSource, (parser_name, source_id))
+        row = self._get_cached_product_source(
+            session,
+            parser_name=parser_name,
+            source_id=source_id,
+        )
         if row is None:
             row = _CatalogProductSource(
                 parser_name=parser_name,
@@ -1006,6 +1292,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 updated_at=now,
             )
             session.add(row)
+            self._cache_product_source(
+                session,
+                parser_name=parser_name,
+                source_id=source_id,
+                row=row,
+            )
             return
 
         if _safe_str(row.canonical_product_id):
@@ -1387,17 +1679,17 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             session.flush()
         primary_category_id = self._primary_category_id(categories)
         settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
+        parser_name = record.parser_name
 
-        existing = session.scalar(
-            select(_CatalogProduct).where(
-                _CatalogProduct.parser_name == record.parser_name,
-                _CatalogProduct.source_id == source_id,
-            )
+        existing = self._get_cached_product_row(
+            session,
+            parser_name=parser_name,
+            source_id=source_id,
         )
 
         if existing is None:
             existing = _CatalogProduct(
-                parser_name=record.parser_name,
+                parser_name=parser_name,
                 source_id=source_id,
                 created_at=now,
                 updated_at=now,
@@ -1436,6 +1728,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             )
             session.add(existing)
             session.flush([existing])
+            self._cache_product_row(
+                session,
+                parser_name=parser_name,
+                source_id=source_id,
+                row=existing,
+            )
             if existing.id is not None and self._has_any_assets(record):
                 self._replace_product_assets(session, int(existing.id), record, now=now)
             LOGGER.debug(
@@ -1550,9 +1848,36 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         *,
         now: datetime,
     ) -> None:
+        if self._asset_batch_mode_enabled(session):
+            buffered = session.info.setdefault("_catalog_asset_replace_buffer", {})
+            if isinstance(buffered, dict):
+                buffered[int(product_id)] = self._build_product_asset_rows(
+                    product_id=int(product_id),
+                    record=record,
+                    now=now,
+                )
+            LOGGER.debug("Catalog product assets buffered: product_id=%s", product_id)
+            return
+
         session.execute(
             delete(_CatalogProductAsset).where(_CatalogProductAsset.product_id == int(product_id))
         )
+        rows = self._build_product_asset_rows(
+            product_id=int(product_id),
+            record=record,
+            now=now,
+        )
+        if rows:
+            session.execute(insert(_CatalogProductAsset), rows)
+        LOGGER.debug("Catalog product assets replaced: product_id=%s rows=%s", product_id, len(rows))
+
+    def _build_product_asset_rows(
+        self,
+        *,
+        product_id: int,
+        record: NormalizedProductRecord,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for asset_kind, values in self._iter_asset_values(record):
             for idx, value in enumerate(values):
@@ -1566,9 +1891,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                         "updated_at": now,
                     }
                 )
-        if rows:
-            session.execute(insert(_CatalogProductAsset), rows)
-        LOGGER.debug("Catalog product assets replaced: product_id=%s rows=%s", product_id, len(rows))
+        return rows
 
     @staticmethod
     def _primary_category_id(categories: list[tuple[_CatalogCategory, int]]) -> int | None:

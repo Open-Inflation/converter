@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
-from converter.core.models import NormalizedProductRecord, RawProductRecord
+from converter.core.models import NormalizedProductRecord, RawProductRecord, SyncChunkV2
 from converter.core.ports import StorageRepository
 
 
@@ -92,6 +93,40 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             (row_id, kind),
         ).fetchall()
         return [str(row["value"]) for row in rows]
+
+    @staticmethod
+    def _make_chunk_record(
+        idx: int,
+        *,
+        observed_at: datetime,
+        image_url: str | None = None,
+    ) -> NormalizedProductRecord:
+        images = [image_url] if image_url is not None else []
+        return NormalizedProductRecord(
+            parser_name="fixprice",
+            title_original=f"Chunk product {idx}",
+            title_normalized=f"chunk product {idx}",
+            title_original_no_stopwords=f"chunk product {idx}",
+            title_normalized_no_stopwords=f"chunk product {idx}",
+            brand="Brand",
+            unit="PCE",
+            available_count=1.0,
+            package_quantity=None,
+            package_unit=None,
+            source_id=f"receiver:chunk:{idx}",
+            sku=f"chunk-sku-{idx}",
+            price=100.0 + idx,
+            discount_price=90.0 + idx,
+            loyal_price=80.0 + idx,
+            price_unit="RUB",
+            image_urls=images,
+            observed_at=observed_at,
+            source_payload={
+                "receiver_run_id": "chunk-run",
+                "receiver_product_id": idx + 1,
+                "receiver_artifact_id": 1000 + idx,
+            },
+        )
 
     def test_schema_excludes_removed_columns(self) -> None:
         db_path = self._make_db()
@@ -1266,6 +1301,114 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 )
             finally:
                 conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_apply_chunk_uses_sublinear_sql_growth(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+
+            def _run_and_count(chunk: SyncChunkV2) -> int:
+                statements: list[str] = []
+
+                def _on_before_cursor_execute(
+                    _conn,
+                    _cursor,
+                    statement,
+                    _parameters,
+                    _context,
+                    _executemany,
+                ) -> None:
+                    statements.append(str(statement))
+
+                event.listen(repo._engine, "before_cursor_execute", _on_before_cursor_execute)
+                try:
+                    repo.apply_chunk(chunk)
+                finally:
+                    event.remove(repo._engine, "before_cursor_execute", _on_before_cursor_execute)
+                return len(statements)
+
+            observed = datetime(2026, 3, 1, tzinfo=timezone.utc)
+            small_chunk = SyncChunkV2(
+                parser_name="fixprice",
+                chunk_id="chunk-small",
+                records=[self._make_chunk_record(0, observed_at=observed)],
+            )
+            large_chunk = SyncChunkV2(
+                parser_name="fixprice",
+                chunk_id="chunk-large",
+                records=[self._make_chunk_record(i + 1, observed_at=observed) for i in range(20)],
+            )
+
+            small_count = _run_and_count(small_chunk)
+            large_count = _run_and_count(large_chunk)
+
+            self.assertGreater(small_count, 0)
+            self.assertLessEqual(large_count, 250)
+            self.assertLessEqual(large_count, small_count * 13)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_apply_chunk_batches_asset_deletes(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed_first = datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc)
+            observed_second = datetime(2026, 3, 1, 11, 0, tzinfo=timezone.utc)
+
+            first_chunk = SyncChunkV2(
+                parser_name="fixprice",
+                chunk_id="chunk-assets-initial",
+                records=[
+                    self._make_chunk_record(
+                        idx=i,
+                        observed_at=observed_first,
+                        image_url=f"https://cdn.example/initial-{i}.jpg",
+                    )
+                    for i in range(3)
+                ],
+            )
+            repo.apply_chunk(first_chunk)
+
+            second_chunk = SyncChunkV2(
+                parser_name="fixprice",
+                chunk_id="chunk-assets-update",
+                records=[
+                    self._make_chunk_record(
+                        idx=i,
+                        observed_at=observed_second,
+                        image_url=f"https://cdn.example/updated-{i}.jpg",
+                    )
+                    for i in range(3)
+                ],
+            )
+
+            statements: list[str] = []
+
+            def _on_before_cursor_execute(
+                _conn,
+                _cursor,
+                statement,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                statements.append(str(statement))
+
+            event.listen(repo._engine, "before_cursor_execute", _on_before_cursor_execute)
+            try:
+                repo.apply_chunk(second_chunk)
+            finally:
+                event.remove(repo._engine, "before_cursor_execute", _on_before_cursor_execute)
+
+            asset_delete_sql = [
+                token
+                for token in statements
+                if "DELETE FROM catalog_product_assets" in token
+            ]
+            self.assertEqual(len(asset_delete_sql), 1)
+            self.assertIn(" IN ", asset_delete_sql[0].upper())
         finally:
             db_path.unlink(missing_ok=True)
 

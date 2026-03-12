@@ -296,60 +296,6 @@ class _CatalogProductAsset(_CatalogBase):
     )
 
 
-class _CatalogIngestStageProduct(_CatalogBase):
-    __tablename__ = "catalog_ingest_stage_products"
-
-    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
-    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    row_no: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
-    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    canonical_product_id: Mapped[str | None] = mapped_column(_uuid_text(), nullable=True)
-    content_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_event_uid: Mapped[str] = mapped_column(String(191), nullable=False)
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "chunk_id",
-            "row_no",
-            name="uq_catalog_stage_products_chunk_row",
-        ),
-    )
-
-
-class _CatalogIngestStageAsset(_CatalogBase):
-    __tablename__ = "catalog_ingest_stage_assets"
-
-    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
-    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    asset_kind: Mapped[str] = mapped_column(_PRODUCT_ASSET_KIND_ENUM, nullable=False)
-    sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class _CatalogIngestStageCategory(_CatalogBase):
-    __tablename__ = "catalog_ingest_stage_categories"
-
-    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
-    chunk_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    parser_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    parent_uid: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    depth: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
-    alias: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class _CatalogStorageDeleteOutbox(_CatalogBase):
     __tablename__ = "catalog_storage_delete_outbox"
 
@@ -369,9 +315,6 @@ __all__ = [
     "_CatalogCategory",
     "_CatalogIdentityMap",
     "_CatalogImageFingerprint",
-    "_CatalogIngestStageAsset",
-    "_CatalogIngestStageCategory",
-    "_CatalogIngestStageProduct",
     "_CatalogProduct",
     "_CatalogProductAsset",
     "_CatalogProductSnapshot",
