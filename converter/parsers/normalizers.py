@@ -32,6 +32,7 @@ _LATIN_TO_CYRILLIC = str.maketrans(
         "y": "у",
     }
 )
+_LATIN_TO_CYRILLIC_KEYS = frozenset("abcehkmoptxy")
 _NO_LEMMATIZE_TOKENS = {
     "см",
     "мм",
@@ -60,7 +61,7 @@ class RussianTextNormalizer:
     def clean_text(self, text: str) -> str:
         cleaned = text.strip().lower().replace("ё", "е")
         cleaned = cleaned.replace("×", "x")
-        cleaned = _MIXED_CYR_LAT_TOKEN_RE.sub(lambda match: match.group(0).translate(_LATIN_TO_CYRILLIC), cleaned)
+        cleaned = _MIXED_CYR_LAT_TOKEN_RE.sub(_normalize_mixed_cyr_lat_token, cleaned)
         cleaned = QUOTE_RE.sub("", cleaned)
         cleaned = NON_WORD_RE.sub(" ", cleaned)
         cleaned = MULTISPACE_RE.sub(" ", cleaned).strip()
@@ -100,3 +101,11 @@ class RussianTextNormalizer:
         tokens = self.tokenize(cleaned)
         filtered = [token for token in tokens if token not in self._stopwords]
         return " ".join(filtered).strip()
+
+
+def _normalize_mixed_cyr_lat_token(match: re.Match[str]) -> str:
+    token = match.group(0)
+    latin_chars = [char for char in token if "a" <= char <= "z"]
+    if latin_chars and all(char in _LATIN_TO_CYRILLIC_KEYS for char in latin_chars):
+        return token.translate(_LATIN_TO_CYRILLIC)
+    return token

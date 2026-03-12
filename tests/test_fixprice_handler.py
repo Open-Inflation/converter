@@ -44,6 +44,12 @@ class FixPriceHandlerTests(unittest.TestCase):
         self.assertEqual(result.original_name_no_stopwords.split()[0], "хлебцы")
         self.assertEqual(result.name_normalized.split()[0], "хлебец")
 
+    def test_title_parser_splits_latin_prefix_from_cyrillic_word_without_letter_fragmentation(self) -> None:
+        result = self.handler.normalize_title("PROактивность")
+
+        self.assertEqual(result.name_normalized, "pro активность")
+        self.assertEqual(result.normalized_name_no_stopwords, "pro активность")
+
     def test_title_parser_does_not_treat_dimensions_as_brand(self) -> None:
         result = self.handler.normalize_title("Пакет подарочный, 12х14, в ассортименте")
 
