@@ -189,6 +189,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("catalog_snapshot_available_counts", tables)
                 self.assertNotIn("catalog_snapshot_assets", tables)
                 self.assertNotIn("catalog_product_payload_nodes", tables)
+                self.assertNotIn("catalog_settlement_geodata", tables)
             finally:
                 conn.close()
         finally:
@@ -280,6 +281,32 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 conn.commit()
             finally:
                 conn.close()
+
+            with self.assertRaises(RuntimeError):
+                CatalogSQLiteRepository(db_path)
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_schema_validation_rejects_legacy_settlement_geodata_table(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path, validate_schema=False)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    CREATE TABLE catalog_settlement_geodata (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        settlement_id INTEGER NOT NULL,
+                        latitude REAL,
+                        longitude REAL
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            repo._engine.dispose()
 
             with self.assertRaises(RuntimeError):
                 CatalogSQLiteRepository(db_path)
@@ -833,7 +860,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_upsert_persists_settlements_categories_and_geodata(self) -> None:
+    def test_upsert_persists_settlements_and_categories(self) -> None:
         db_path = self._make_db()
         try:
             repo = CatalogSQLiteRepository(db_path)
@@ -891,9 +918,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
                 self.assertIsNotNone(settlement["geo_point"])
-
-                geo_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_settlement_geodata").fetchone()
-                self.assertEqual(int(geo_rows["cnt"]), 1)
 
                 category_rows = conn.execute(
                     "SELECT source_uid, title, depth FROM catalog_categories ORDER BY depth ASC"
@@ -961,7 +985,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_upsert_persists_geodata_from_artifact_coordinates_fallback(self) -> None:
+    def test_upsert_persists_settlement_coordinates_from_artifact_fallback(self) -> None:
         db_path = self._make_db()
         try:
             repo = CatalogSQLiteRepository(db_path)
@@ -996,20 +1020,20 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             try:
-                geo = conn.execute(
-                    "SELECT latitude, longitude, geo_point FROM catalog_settlement_geodata ORDER BY id DESC LIMIT 1"
+                settlement = conn.execute(
+                    "SELECT latitude, longitude, geo_point FROM catalog_settlements ORDER BY id DESC LIMIT 1"
                 ).fetchone()
-                self.assertIsNotNone(geo)
-                assert geo is not None
-                self.assertAlmostEqual(float(geo["latitude"]), 59.93863, places=5)
-                self.assertAlmostEqual(float(geo["longitude"]), 30.31413, places=5)
-                self.assertIsNotNone(geo["geo_point"])
+                self.assertIsNotNone(settlement)
+                assert settlement is not None
+                self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
+                self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
+                self.assertIsNotNone(settlement["geo_point"])
             finally:
                 conn.close()
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_upsert_skips_invalid_geodata_coordinates_without_failing(self) -> None:
+    def test_upsert_skips_invalid_settlement_coordinates_without_failing(self) -> None:
         db_path = self._make_db()
         try:
             repo = CatalogSQLiteRepository(db_path)
@@ -1048,15 +1072,12 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNone(settlement["latitude"])
                 self.assertIsNone(settlement["longitude"])
                 self.assertIsNone(settlement["geo_point"])
-
-                geo_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_settlement_geodata").fetchone()
-                self.assertEqual(int(geo_rows["cnt"]), 0)
             finally:
                 conn.close()
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_upsert_geodata_history_orders_by_observed_at(self) -> None:
+    def test_upsert_settlement_keeps_initial_coordinates(self) -> None:
         db_path = self._make_db()
         try:
             repo = CatalogSQLiteRepository(db_path)
@@ -1105,15 +1126,18 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             try:
-                rows = conn.execute(
+                settlement = conn.execute(
                     """
-                    SELECT observed_at, latitude, longitude
-                    FROM catalog_settlement_geodata
-                    ORDER BY observed_at ASC
+                    SELECT latitude, longitude
+                    FROM catalog_settlements
+                    ORDER BY id DESC
+                    LIMIT 1
                     """
-                ).fetchall()
-                self.assertEqual(len(rows), 2)
-                self.assertLessEqual(str(rows[0]["observed_at"]), str(rows[1]["observed_at"]))
+                ).fetchone()
+                self.assertIsNotNone(settlement)
+                assert settlement is not None
+                self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
+                self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
             finally:
                 conn.close()
         finally:

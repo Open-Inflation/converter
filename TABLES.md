@@ -1,0 +1,459 @@
+# TABLES.md
+
+Документ описывает таблицы, которые использует текущий runtime `converter`.
+
+- Блок `catalog_*` - целевая БД каталога (создается ORM `converter`).
+- Блок `run_*` / `task_runs` - таблицы БД `receiver`, которые `converter` читает/чистит.
+- В PostgreSQL используются native-типы (`UUID`, `NUMERIC`, `TIMESTAMPTZ`, `ENUM`, `GEOGRAPHY`).
+- В SQLite в тестах используются совместимые fallback-типы.
+
+## Catalog DB
+
+### ENUM типы
+
+`catalog_storage_delete_status_enum`:
+- `pending`
+- `done`
+- `failed`
+
+`catalog_product_asset_kind_enum`:
+- `image_url`
+- `duplicate_image_url`
+- `image_fingerprint`
+
+### `catalog_products`
+
+Текущая read-model проекция товара (одна строка на `(parser_name, source_id)`).
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `canonical_product_id` | `UUID` | no | Канонический ID товара |
+| `parser_name` | `VARCHAR(64)` | no | Источник парсера |
+| `source_id` | `VARCHAR(255)` | no | Идентификатор товара у источника |
+| `plu` | `VARCHAR(128)` | yes | PLU |
+| `sku` | `VARCHAR(128)` | yes | SKU |
+| `title_original` | `TEXT` | no | Оригинальный title |
+| `title_normalized_no_stopwords` | `TEXT` | no | Нормализованный title без stop-слов |
+| `brand` | `VARCHAR(255)` | yes | Бренд |
+| `source_page_url` | `TEXT` | yes | URL карточки |
+| `description` | `TEXT` | yes | Описание |
+| `producer_name` | `VARCHAR(255)` | yes | Производитель |
+| `producer_country` | `VARCHAR(32)` | yes | Страна производителя |
+| `expiration_date_in_days` | `INTEGER` | yes | Срок годности в днях |
+| `rating` | `FLOAT` | yes | Рейтинг |
+| `reviews_count` | `INTEGER` | yes | Число отзывов |
+| `price` | `NUMERIC(12,4)` | yes | Цена |
+| `discount_price` | `NUMERIC(12,4)` | yes | Цена со скидкой |
+| `loyal_price` | `NUMERIC(12,4)` | yes | Лояльная цена |
+| `price_unit` | `VARCHAR(32)` | yes | Валюта/единица цены |
+| `adult` | `BOOLEAN` | yes | 18+ |
+| `is_new` | `BOOLEAN` | yes | Новинка |
+| `promo` | `BOOLEAN` | yes | Промо |
+| `season` | `BOOLEAN` | yes | Сезонный |
+| `hit` | `BOOLEAN` | yes | Хит |
+| `data_matrix` | `BOOLEAN` | yes | Флаг data matrix |
+| `unit` | `VARCHAR(32)` | no | Единица измерения |
+| `available_count` | `FLOAT` | yes | Наличие |
+| `package_quantity` | `FLOAT` | yes | Кол-во в упаковке |
+| `package_unit` | `VARCHAR(32)` | yes | Единица упаковки |
+| `primary_category_id` | `BIGINT` | yes | Основная категория (только current-state) |
+| `settlement_id` | `BIGINT` | yes | Привязка к settlement |
+| `composition_original` | `TEXT` | yes | Состав (оригинал) |
+| `composition_normalized` | `TEXT` | yes | Состав (нормализованный) |
+| `observed_at` | `TIMESTAMPTZ` | no | Когда товар наблюдался в источнике |
+| `created_at` | `TIMESTAMPTZ` | no | Когда строка создана в каталоге |
+| `updated_at` | `TIMESTAMPTZ` | no | Когда строка обновлена в каталоге |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(parser_name, source_id)` (`uq_catalog_products_source`)
+- Indexes: `canonical_product_id`, `primary_category_id`, `settlement_id`, `observed_at`
+
+### `catalog_product_snapshots`
+
+История волатильных полей товара (append/reuse snapshot model).
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `canonical_product_id` | `UUID` | no | Канонический ID |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source_id` | `VARCHAR(255)` | no | Source ID |
+| `source_run_id` | `VARCHAR(64)` | yes | Run ID из receiver payload |
+| `receiver_product_id` | `BIGINT` | yes | ID продукта в receiver |
+| `receiver_artifact_id` | `BIGINT` | yes | ID артефакта в receiver |
+| `receiver_sort_order` | `BIGINT` | yes | Sort order из receiver |
+| `source_event_uid` | `VARCHAR(191)` | yes | Дедуп событий snapshot |
+| `content_fingerprint` | `VARCHAR(64)` | yes | Fingerprint контента snapshot |
+| `valid_from_at` | `TIMESTAMPTZ` | yes | Начало валидности |
+| `valid_to_at` | `TIMESTAMPTZ` | yes | Конец валидности |
+| `observed_at` | `TIMESTAMPTZ` | no | Время наблюдения |
+| `created_at` | `TIMESTAMPTZ` | no | Время вставки |
+| `price` | `NUMERIC(12,4)` | yes | Цена |
+| `discount_price` | `NUMERIC(12,4)` | yes | Цена со скидкой |
+| `loyal_price` | `NUMERIC(12,4)` | yes | Лояльная цена |
+| `price_unit` | `VARCHAR(32)` | yes | Единица цены |
+| `available_count` | `FLOAT` | yes | Наличие |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(source_event_uid)` (`uq_cps_event`)
+- Indexes: `canonical_product_id`, `parser_name`, `source_id`, `source_event_uid`, `content_fingerprint`, `valid_from_at`, `valid_to_at`, `observed_at`, `created_at`
+
+### `catalog_product_sources`
+
+Состояние источника `(parser_name, source_id)` для быстрых решений reuse/new snapshot.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `parser_name` | `VARCHAR(64)` | no | PK part |
+| `source_id` | `VARCHAR(255)` | no | PK part |
+| `canonical_product_id` | `UUID` | no | Канонический ID |
+| `latest_snapshot_id` | `BIGINT` | yes | Последний snapshot |
+| `latest_content_fingerprint` | `VARCHAR(64)` | yes | Fingerprint последнего snapshot |
+| `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
+| `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления source-state |
+
+Constraints/indexes:
+- `PK(parser_name, source_id)`
+- Index: `canonical_product_id`
+
+### `catalog_settlements`
+
+Справочник населенных пунктов и региональной географии.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `geo_key` | `VARCHAR(191)` | no | Уникальный ключ гео |
+| `country` | `VARCHAR(64)` | yes | Страна |
+| `country_normalized` | `VARCHAR(128)` | yes | Нормализованная страна |
+| `region` | `TEXT` | yes | Регион |
+| `region_normalized` | `TEXT` | yes | Нормализованный регион |
+| `name` | `VARCHAR(255)` | yes | Название settlement |
+| `name_normalized` | `VARCHAR(255)` | yes | Нормализованное название |
+| `settlement_type` | `VARCHAR(32)` | yes | Тип settlement |
+| `alias` | `VARCHAR(255)` | yes | Алиас |
+| `latitude` | `FLOAT` | yes | Широта |
+| `longitude` | `FLOAT` | yes | Долгота |
+| `geo_point` | `GEOGRAPHY(POINT,4326)` | yes | PostGIS point |
+| `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
+| `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(geo_key)`
+- GiST index `ix_catalog_settlements_geo_point_gist` on `geo_point`
+
+### `catalog_categories`
+
+Справочник категорий.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `category_key` | `VARCHAR(191)` | no | Уникальный category key |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source_uid` | `VARCHAR(128)` | yes | UID категории у источника |
+| `parent_source_uid` | `VARCHAR(128)` | yes | Родительский UID |
+| `title` | `TEXT` | yes | Заголовок категории |
+| `title_normalized` | `TEXT` | yes | Нормализованный заголовок |
+| `alias` | `TEXT` | yes | Алиас |
+| `depth` | `INTEGER` | yes | Глубина |
+| `sort_order` | `INTEGER` | yes | Порядок |
+| `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
+| `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(category_key)`
+- Indexes: `parser_name`, `source_uid`
+
+### `catalog_identity_map`
+
+Map идентичности товара: `(parser_name, identity_type, identity_value) -> canonical_product_id`.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `parser_name` | `VARCHAR(64)` | no | PK part |
+| `identity_type` | `VARCHAR(64)` | no | PK part (`plu`, `sku`, `source_id`, `normalized_name`) |
+| `identity_value` | `VARCHAR(255)` | no | PK part |
+| `canonical_product_id` | `UUID` | no | Канонический ID |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления соответствия |
+
+Constraints/indexes:
+- `PK(parser_name, identity_type, identity_value)`
+- Index: `canonical_product_id`
+
+### `catalog_image_fingerprints`
+
+Persistent дедуп изображений.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `fingerprint` | `VARCHAR(64)` | no | PK, hash изображения/URL |
+| `canonical_url` | `TEXT` | no | Канонический URL |
+| `created_at` | `TIMESTAMPTZ` | no | Время создания |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
+
+Constraints/indexes:
+- `PK(fingerprint)`
+
+### `catalog_product_assets`
+
+Нормализованные ассеты current-state товара.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `product_id` | `BIGINT` | no | ID из `catalog_products` |
+| `asset_kind` | `catalog_product_asset_kind_enum` | no | Тип asset |
+| `sort_order` | `BIGINT` | no | Позиция в списке |
+| `value` | `TEXT` | no | Значение asset |
+| `created_at` | `TIMESTAMPTZ` | no | Время создания |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(product_id, asset_kind, sort_order)` (`uq_catalog_product_assets_slot`)
+- Index: `product_id`
+
+### `catalog_ingest_stage_products`
+
+Stage-таблица чанка для product payload.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `chunk_id` | `VARCHAR(128)` | no | Идентификатор чанка |
+| `row_no` | `BIGINT` | no | Порядок записи в чанке |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source_id` | `VARCHAR(255)` | no | Source ID |
+| `canonical_product_id` | `UUID` | yes | Канонический ID (на момент stage) |
+| `content_fingerprint` | `VARCHAR(64)` | no | Fingerprint snapshot контента |
+| `source_event_uid` | `VARCHAR(191)` | no | Event UID |
+| `observed_at` | `TIMESTAMPTZ` | no | Observed at |
+| `receiver_product_id` | `BIGINT` | yes | Product ID в receiver |
+| `receiver_artifact_id` | `BIGINT` | yes | Artifact ID в receiver |
+| `created_at` | `TIMESTAMPTZ` | no | Время stage-вставки |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(chunk_id, row_no)` (`uq_catalog_stage_products_chunk_row`)
+- Index: `chunk_id`
+
+### `catalog_ingest_stage_assets`
+
+Stage-таблица чанка для asset payload.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `chunk_id` | `VARCHAR(128)` | no | Идентификатор чанка |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source_id` | `VARCHAR(255)` | no | Source ID |
+| `asset_kind` | `catalog_product_asset_kind_enum` | no | Тип asset |
+| `sort_order` | `BIGINT` | no | Порядок |
+| `value` | `TEXT` | no | Значение |
+| `created_at` | `TIMESTAMPTZ` | no | Время stage-вставки |
+
+Constraints/indexes:
+- `PK(id)`
+- Index: `chunk_id`
+
+### `catalog_ingest_stage_categories`
+
+Stage-таблица чанка для category payload.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `chunk_id` | `VARCHAR(128)` | no | Идентификатор чанка |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source_id` | `VARCHAR(255)` | no | Source ID |
+| `uid` | `VARCHAR(128)` | yes | UID категории |
+| `title` | `TEXT` | yes | Title категории |
+| `parent_uid` | `VARCHAR(128)` | yes | Родительский UID |
+| `depth` | `BIGINT` | yes | Глубина |
+| `sort_order` | `BIGINT` | no | Порядок |
+| `alias` | `TEXT` | yes | Алиас |
+| `created_at` | `TIMESTAMPTZ` | no | Время stage-вставки |
+
+Constraints/indexes:
+- `PK(id)`
+- Index: `chunk_id`
+
+### `catalog_storage_delete_outbox`
+
+Outbox для удаления duplicate image URL в storage.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `dedupe_key` | `VARCHAR(64)` | no | Уникальный ключ дубликата |
+| `image_url` | `TEXT` | no | URL на удаление |
+| `status` | `catalog_storage_delete_status_enum` | no | Статус обработки |
+| `attempts` | `BIGINT` | no | Кол-во попыток |
+| `enqueued_at` | `TIMESTAMPTZ` | no | Когда поставлено в outbox |
+| `available_at` | `TIMESTAMPTZ` | no | Когда можно повторно обработать |
+| `processed_at` | `TIMESTAMPTZ` | yes | Когда успешно/финально обработано |
+| `last_error` | `TEXT` | yes | Последняя ошибка |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(dedupe_key)`
+- Indexes: `status`, `available_at`
+
+## Receiver DB (contract used by converter)
+
+Ниже таблицы `receiver`, которые `converter` читает и/или чистит в consume-delete flow.
+
+### `run_artifacts`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `run_id` | `VARCHAR(64)` | yes | Run ID |
+| `source` | `VARCHAR(255)` | yes | Источник артефакта |
+| `parser_name` | `VARCHAR(64)` | yes | Имя парсера |
+| `retail_type` | `VARCHAR(64)` | yes | Тип ритейла |
+| `code` | `VARCHAR(128)` | yes | Код точки |
+| `address` | `TEXT` | yes | Адрес |
+| `schedule_weekdays_open_from` | `VARCHAR(16)` | yes | График |
+| `schedule_weekdays_closed_from` | `VARCHAR(16)` | yes | График |
+| `schedule_saturday_open_from` | `VARCHAR(16)` | yes | График |
+| `schedule_saturday_closed_from` | `VARCHAR(16)` | yes | График |
+| `schedule_sunday_open_from` | `VARCHAR(16)` | yes | График |
+| `schedule_sunday_closed_from` | `VARCHAR(16)` | yes | График |
+| `temporarily_closed` | `BOOLEAN` | yes | Временно закрыт |
+| `longitude` | `FLOAT` | yes | Долгота |
+| `latitude` | `FLOAT` | yes | Широта |
+| `dataclass_validated` | `BOOLEAN` | yes | Флаг dataclass validation |
+| `dataclass_validation_error` | `TEXT` | yes | Ошибка валидации |
+| `ingested_at` | `TIMESTAMPTZ` | yes | Когда артефакт ingested |
+
+### `task_runs`
+
+`converter` использует это для накопления времени обработки run и отметки finish.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `VARCHAR(64)` | no | PK |
+| `converter_elapsed_sec` | `BIGINT` | yes | Накопленное время converter в секундах |
+| `finish` | `TIMESTAMPTZ` | yes | Время завершения consume-delete по run |
+
+### `run_artifact_products`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `artifact_id` | `BIGINT` | no | Связь с `run_artifacts` |
+| `sku` | `VARCHAR(128)` | yes | SKU |
+| `plu` | `VARCHAR(128)` | yes | PLU |
+| `source_page_url` | `TEXT` | yes | URL карточки |
+| `title` | `TEXT` | yes | Title |
+| `description` | `TEXT` | yes | Описание |
+| `adult` | `BOOLEAN` | yes | 18+ |
+| `is_new` | `BOOLEAN` | yes | Новинка |
+| `promo` | `BOOLEAN` | yes | Промо |
+| `season` | `BOOLEAN` | yes | Сезонный |
+| `hit` | `BOOLEAN` | yes | Хит |
+| `data_matrix` | `BOOLEAN` | yes | Флаг data matrix |
+| `composition` | `TEXT` | yes | Состав |
+| `brand` | `VARCHAR(255)` | yes | Бренд |
+| `producer_name` | `VARCHAR(255)` | yes | Производитель |
+| `producer_country` | `VARCHAR(32)` | yes | Страна производителя |
+| `expiration_date_in_days` | `BIGINT` | yes | Срок годности в днях |
+| `rating` | `FLOAT` | yes | Рейтинг |
+| `reviews_count` | `BIGINT` | yes | Кол-во отзывов |
+| `price` | `FLOAT` | yes | Цена |
+| `discount_price` | `FLOAT` | yes | Цена со скидкой |
+| `loyal_price` | `FLOAT` | yes | Лояльная цена |
+| `price_unit` | `VARCHAR(32)` | yes | Единица цены |
+| `unit` | `VARCHAR(32)` | yes | Единица измерения |
+| `available_count` | `FLOAT` | yes | Наличие |
+| `package_quantity` | `FLOAT` | yes | Кол-во в упаковке |
+| `package_unit` | `VARCHAR(32)` | yes | Единица упаковки |
+| `categories_uid_json` | `JSONB` | yes | Категории UID |
+| `main_image` | `TEXT` | yes | Главное изображение |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+### `run_artifact_categories`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `artifact_id` | `BIGINT` | no | Связь с артефактом |
+| `uid` | `VARCHAR(128)` | yes | UID категории |
+| `parent_uid` | `VARCHAR(128)` | yes | Родительский UID |
+| `alias` | `VARCHAR(255)` | yes | Алиас |
+| `title` | `VARCHAR(255)` | yes | Название |
+| `adult` | `BOOLEAN` | yes | 18+ категория |
+| `icon` | `TEXT` | yes | Иконка |
+| `banner` | `TEXT` | yes | Баннер |
+| `depth` | `BIGINT` | yes | Глубина |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+### `run_artifact_administrative_units`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `artifact_id` | `BIGINT` | no | Связь с артефактом |
+| `settlement_type` | `VARCHAR(32)` | yes | Тип settlement |
+| `name` | `VARCHAR(255)` | yes | Название settlement |
+| `alias` | `VARCHAR(255)` | yes | Алиас |
+| `region` | `VARCHAR(255)` | yes | Регион |
+| `country` | `VARCHAR(64)` | yes | Страна |
+| `longitude` | `FLOAT` | yes | Долгота |
+| `latitude` | `FLOAT` | yes | Широта |
+
+### `run_artifact_product_images`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `product_id` | `BIGINT` | no | Product ID |
+| `url` | `TEXT` | yes | URL изображения |
+| `is_main` | `BOOLEAN` | yes | Главное изображение |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+### `run_artifact_product_meta`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `product_id` | `BIGINT` | no | Product ID |
+| `name` | `VARCHAR(255)` | yes | Имя атрибута |
+| `alias` | `VARCHAR(255)` | yes | Алиас атрибута |
+| `value_type` | `VARCHAR(32)` | yes | Тип значения |
+| `value_text` | `TEXT` | yes | Значение |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+### `run_artifact_product_wholesale_prices`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `product_id` | `BIGINT` | no | Product ID |
+| `from_items` | `FLOAT` | yes | Порог кол-ва |
+| `price` | `FLOAT` | yes | Оптовая цена |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+### `run_artifact_product_categories`
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK |
+| `product_id` | `BIGINT` | no | Product ID |
+| `category_uid` | `VARCHAR(128)` | yes | UID категории |
+| `sort_order` | `BIGINT` | yes | Порядок |
+
+## Что исключено из текущего runtime
+
+- Историческая таблица связей snapshot->category (`catalog_product_category_links`) отключена в текущем runtime и больше не используется при записи.
+- Историческая таблица гео-координат (`catalog_settlement_geodata`) удалена из runtime-контракта; используются только текущие координаты в `catalog_settlements`.

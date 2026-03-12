@@ -39,7 +39,6 @@ from .catalog_schema import (
     _CatalogProductSnapshot,
     _CatalogProductSource,
     _CatalogSettlement,
-    _CatalogSettlementGeodata,
     _CatalogStorageDeleteOutbox,
     _as_float,
     _is_missing,
@@ -56,7 +55,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
     Policy:
     - append-only history to `catalog_product_snapshots`;
-    - additive updates for dimensions (settlements/categories/geodata);
+    - additive updates for dimensions (settlements/categories);
     - non-destructive merge for `catalog_products` current projection.
     """
 
@@ -186,12 +185,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                         snapshot_fingerprint=snapshot_fingerprint,
                     )
 
-                self._append_settlement_geodata(
-                    session,
-                    settlement=settlement,
-                    record=record,
-                    payload=payload,
-                )
                 self._upsert_product_row(
                     session,
                     record,
@@ -327,12 +320,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     snapshot=snapshot,
                     snapshot_fingerprint=snapshot_fingerprint,
                 )
-            self._append_settlement_geodata(
-                session,
-                settlement=settlement,
-                record=record,
-                payload=payload,
-            )
             self._upsert_product_row(
                 session,
                 record,
@@ -1123,76 +1110,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             key,
         )
         return row
-
-    def _append_settlement_geodata(
-        self,
-        session: Session,
-        *,
-        settlement: _CatalogSettlement | None,
-        record: NormalizedProductRecord,
-        payload: dict[str, Any],
-    ) -> None:
-        if settlement is None or settlement.id is None:
-            return
-
-        latitude, longitude = self._extract_geo_coordinates(payload)
-        normalized_geo = self._normalize_geo_coordinates(latitude, longitude)
-        if latitude is not None and longitude is not None and normalized_geo is None:
-            LOGGER.warning(
-                "Catalog settlement coordinates skipped due to invalid range: parser=%s source_id=%s latitude=%s longitude=%s",
-                record.parser_name,
-                self._source_id(record),
-                latitude,
-                longitude,
-            )
-            latitude = None
-            longitude = None
-        elif normalized_geo is not None:
-            latitude, longitude = normalized_geo
-        if latitude is None or longitude is None:
-            return
-        normalized = self._normalize_geo_coordinates(latitude, longitude)
-        if normalized is None:
-            LOGGER.warning(
-                "Catalog geodata skipped due to invalid coordinate range: settlement_id=%s latitude=%s longitude=%s",
-                settlement.id,
-                latitude,
-                longitude,
-            )
-            return
-        latitude, longitude = normalized
-        fingerprint = hashlib.sha256(f"{settlement.id}:{latitude:.8f}:{longitude:.8f}".encode("utf-8")).hexdigest()
-        for pending in session.new:
-            if not isinstance(pending, _CatalogSettlementGeodata):
-                continue
-            if pending.geo_fingerprint == fingerprint:
-                return
-
-        existing = session.scalar(
-            select(_CatalogSettlementGeodata.id).where(_CatalogSettlementGeodata.geo_fingerprint == fingerprint)
-        )
-        if existing is not None:
-            return
-
-        row = _CatalogSettlementGeodata(
-            geo_fingerprint=fingerprint,
-            settlement_id=settlement.id,
-            latitude=latitude,
-            longitude=longitude,
-            geo_point=self._to_geo_point(latitude=latitude, longitude=longitude),
-            observed_at=self._to_utc(record.observed_at),
-            source_run_id=_safe_str(payload.get("receiver_run_id")),
-            receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
-            receiver_product_id=self._to_int(payload.get("receiver_product_id")),
-            created_at=_utc_now(),
-        )
-        session.add(row)
-        LOGGER.debug(
-            "Catalog settlement geodata appended: settlement_id=%s latitude=%.8f longitude=%.8f",
-            settlement.id,
-            latitude,
-            longitude,
-        )
 
     def _upsert_categories(
         self,

@@ -50,7 +50,6 @@ converter/
   плюс event-контракт (`source_event_uid`, `content_fingerprint`, `valid_from_at/valid_to_at`, `observed_at`, `created_at`).
 - `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
-- `catalog_settlement_geodata` - история геоточек (`lat/lon`) по settlement.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent).
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
 - `catalog_product_assets` - массивные поля текущей проекции товара (image urls, duplicates, fingerprints) в нормализованном виде.
@@ -70,7 +69,7 @@ SQLite оставлен только для локальных тестов/фи
 Политика обновления:
 
 - история не удаляется и не перезаписывается (`append-only snapshots`);
-- справочники (`settlements/categories/geodata`) пополняются и дополняются;
+- справочники (`settlements/categories`) пополняются и дополняются;
 - `catalog_products` обновляется неразрушительно: `NULL/пустые` новые значения не затирают заполненные старые.
 
 ## Fix Price handler

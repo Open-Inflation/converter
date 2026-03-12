@@ -238,35 +238,6 @@ class _CatalogSettlement(_CatalogBase):
     )
 
 
-class _CatalogSettlementGeodata(_CatalogBase):
-    __tablename__ = "catalog_settlement_geodata"
-
-    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
-    geo_fingerprint: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
-    settlement_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False, index=True)
-    latitude: Mapped[float] = mapped_column(Float, nullable=False)
-    longitude: Mapped[float] = mapped_column(Float, nullable=False)
-    geo_point: Mapped[str | None] = mapped_column(_GeographyPointType(), nullable=True)
-    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
-    source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        Index(
-            "ix_catalog_settlement_geodata_geo_point_gist",
-            "geo_point",
-            postgresql_using="gist",
-        ),
-        Index(
-            "ix_catalog_settlement_geodata_settlement_observed_at",
-            "settlement_id",
-            "observed_at",
-        ),
-    )
-
-
 class _CatalogCategory(_CatalogBase):
     __tablename__ = "catalog_categories"
 
@@ -406,7 +377,6 @@ __all__ = [
     "_CatalogProductSnapshot",
     "_CatalogProductSource",
     "_CatalogSettlement",
-    "_CatalogSettlementGeodata",
     "_CatalogStorageDeleteOutbox",
     "_as_float",
     "_is_missing",

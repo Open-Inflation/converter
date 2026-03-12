@@ -118,6 +118,11 @@ class _CatalogSchemaMigrationMixin:
                 raise RuntimeError(
                     f"Schema mismatch: legacy table `{table_name}` is not allowed. Run SQL migration."
                 )
+        if inspector.has_table("catalog_settlement_geodata"):
+            raise RuntimeError(
+                "Schema mismatch: legacy table `catalog_settlement_geodata` is not allowed. "
+                "Drop this table and keep only `catalog_settlements`."
+            )
 
         if not inspector.has_table("catalog_product_assets"):
             raise RuntimeError(
@@ -129,12 +134,6 @@ class _CatalogSchemaMigrationMixin:
             if "geo_point" not in settlement_columns:
                 raise RuntimeError(
                     "Schema mismatch in `catalog_settlements`: missing column geo_point."
-                )
-        if inspector.has_table("catalog_settlement_geodata"):
-            geodata_columns = {item["name"] for item in inspector.get_columns("catalog_settlement_geodata")}
-            if "geo_point" not in geodata_columns:
-                raise RuntimeError(
-                    "Schema mismatch in `catalog_settlement_geodata`: missing column geo_point."
                 )
 
         if self._engine.dialect.name == "postgresql":
@@ -213,7 +212,6 @@ class _CatalogSchemaMigrationMixin:
             # SQLAlchemy often introspects PostGIS geography columns as NullType (token "NULL")
             # without extra type plugins, so we treat it as acceptable here.
             ("catalog_settlements", "geo_point", ("GEOGRAPHY", "USER-DEFINED", "NULL")),
-            ("catalog_settlement_geodata", "geo_point", ("GEOGRAPHY", "USER-DEFINED", "NULL")),
         )
         problems: list[str] = []
         for table_name, column_name, expected_tokens in checks:
