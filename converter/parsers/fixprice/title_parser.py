@@ -103,8 +103,8 @@ class FixPriceTitleParser:
             unit = "PCE"
             available_count = float(count) if count is not None else None
 
-        name_for_normalization = f"{name_original} {brand}" if brand else name_original
-        name_normalized = self._normalizer.lemmatize(name_for_normalization)
+        # Keep brand separate from semantic product name.
+        name_normalized = self._normalizer.lemmatize(name_original)
 
         original_without_stopwords = self._normalizer.remove_stopwords(name_original)
         normalized_without_stopwords = self._normalizer.remove_stopwords(name_normalized)

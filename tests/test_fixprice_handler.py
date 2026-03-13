@@ -66,6 +66,20 @@ class FixPriceHandlerTests(unittest.TestCase):
         normalized = self.handler.handle(raw)
         self.assertIsNone(normalized.brand)
 
+    def test_normalized_title_no_stopwords_does_not_include_brand_tokens(self) -> None:
+        result = self.handler.normalize_title("Форма для кулича, O'Kitchen, в ассортименте")
+
+        self.assertEqual(result.brand, "O'Kitchen")
+        self.assertNotIn("kitchen", result.normalized_name_no_stopwords)
+        self.assertNotIn("o", result.normalized_name_no_stopwords.split())
+
+    def test_normalized_title_no_stopwords_does_not_include_cyrillic_brand(self) -> None:
+        result = self.handler.normalize_title("Красители пищевые жидкие, Перцов")
+
+        self.assertEqual(result.brand, "Перцов")
+        self.assertNotIn("перцов", result.normalized_name_no_stopwords)
+        self.assertNotIn("перцовый", result.normalized_name_no_stopwords)
+
     def test_category_normalization_removes_separators_and_lemmatizes(self) -> None:
         result = self.handler.normalize_category("молочные продукты, яйца")
 

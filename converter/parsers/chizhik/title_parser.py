@@ -106,14 +106,34 @@ def _extract_brand(name_part: str) -> str | None:
     return " ".join(candidates[:3])
 
 
+def _remove_brand_from_name(name_part: str, brand: str | None) -> str:
+    if not brand:
+        return name_part
+
+    raw_words = [token for token in name_part.split() if token]
+    if len(raw_words) < 2:
+        return name_part
+
+    brand_word_count = len([token for token in brand.split() if token])
+    if brand_word_count <= 0:
+        return name_part
+
+    prefix = [raw_words[0]]
+    suffix_start = 1 + brand_word_count
+    suffix = raw_words[suffix_start:] if suffix_start < len(raw_words) else []
+    cleaned = " ".join(prefix + suffix).strip(" ,.;:-")
+    return cleaned or name_part
+
+
 class ChizhikTitleParser:
     def __init__(self, text_normalizer: RussianTextNormalizer | None = None) -> None:
         self._normalizer = text_normalizer or RussianTextNormalizer()
 
     def parse(self, title: str) -> TitleNormalizationResult:
         raw = title.strip()
-        name_original = _strip_pack_tokens(raw)
-        brand = _extract_brand(name_original)
+        name_original_with_brand = _strip_pack_tokens(raw)
+        brand = _extract_brand(name_original_with_brand)
+        name_original = _remove_brand_from_name(name_original_with_brand, brand)
 
         available_count, package_quantity, package_unit = _extract_multipack(raw)
         if available_count is None:
@@ -132,10 +152,7 @@ class ChizhikTitleParser:
         else:
             unit = "PCE"
 
-        name_for_normalization = name_original
-        if brand and brand.lower() not in name_original.lower():
-            name_for_normalization = f"{name_original} {brand}"
-        name_normalized = self._normalizer.lemmatize(name_for_normalization)
+        name_normalized = self._normalizer.lemmatize(name_original)
 
         original_without_stopwords = self._normalizer.remove_stopwords(name_original)
         normalized_without_stopwords = self._normalizer.remove_stopwords(name_normalized)

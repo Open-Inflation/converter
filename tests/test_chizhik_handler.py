@@ -46,6 +46,38 @@ class ChizhikHandlerTests(unittest.TestCase):
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.93)
         self.assertEqual(result.package_unit, "LTR")
 
+    def test_title_parser_removes_brand_from_name_fields(self) -> None:
+        result = self.handler.normalize_title("Полусапоги ВетАнна женские р37-42")
+
+        self.assertEqual(result.brand, "ВетАнна")
+        self.assertEqual(result.name_original, "Полусапоги женские р37-42")
+        self.assertNotIn("ветанна", result.original_name_no_stopwords.lower())
+        self.assertNotIn("ветанна", result.normalized_name_no_stopwords.lower())
+
+    def test_title_parser_removes_multiword_brand_from_name_fields(self) -> None:
+        result = self.handler.normalize_title(
+            "Конфеты Вкусы Мира Банано-шарики в какао-глазури"
+        )
+
+        self.assertEqual(result.brand, "Вкусы Мира Банано-шарики")
+        self.assertEqual(result.name_original, "Конфеты в какао-глазури")
+        self.assertNotIn("вкусы", result.original_name_no_stopwords.lower())
+        self.assertNotIn("мира", result.original_name_no_stopwords.lower())
+        self.assertNotIn("банано", result.original_name_no_stopwords.lower())
+
+    def test_handle_removes_brand_from_title_case_insensitive_with_raw_brand(self) -> None:
+        raw = RawProductRecord(
+            parser_name="chizhik",
+            title="Полусапоги ветанна женские р37-42",
+            brand="ВетАнна",
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertEqual(normalized.brand, "ВетАнна")
+        self.assertEqual(normalized.title_original, "Полусапоги женские р37-42")
+        self.assertNotIn("ветанна", normalized.title_original_no_stopwords.lower())
+        self.assertNotIn("ветанна", normalized.title_normalized_no_stopwords.lower())
+
     def test_title_parser_handles_mixed_script_and_does_not_expand_cm(self) -> None:
         result = self.handler.normalize_title("Cалфетки Kitchen Collection 30x30см")
 
