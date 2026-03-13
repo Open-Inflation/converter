@@ -161,11 +161,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     record = prepared.record
                     counters["upserted_products"] += 1
 
+                    settlement = self._upsert_settlement(session, record, payload=prepared.payload)
                     store = self._upsert_store(
                         session,
                         record,
                         payload=prepared.payload,
                         store_data=prepared.store_data,
+                        settlement=settlement,
                     )
                     touched_snapshot = self._touch_latest_snapshot_if_unchanged(
                         session,
@@ -173,7 +175,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                         snapshot_fingerprint=prepared.snapshot_fingerprint,
                         store=store,
                     )
-                    settlement = self._upsert_settlement(session, record, payload=prepared.payload)
                     categories = self._upsert_categories(session, record, payload=prepared.payload)
 
                     if touched_snapshot:
@@ -683,11 +684,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             payload = self._source_payload(record)
             store_data = self._extract_store_components(record, payload=payload)
             store_key = _safe_str(store_data.get("store_key")) if isinstance(store_data, dict) else None
+            settlement = self._upsert_settlement(session, record, payload=payload)
             store = self._upsert_store(
                 session,
                 record,
                 payload=payload,
                 store_data=store_data,
+                settlement=settlement,
             )
             snapshot_fingerprint = self._snapshot_content_fingerprint(
                 record,
@@ -707,7 +710,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 store=store,
             )
 
-            settlement = self._upsert_settlement(session, record, payload=payload)
             categories = self._upsert_categories(session, record, payload=payload)
             if touched_snapshot:
                 self._update_source_fingerprint_in_session(
@@ -1430,6 +1432,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         *,
         payload: dict[str, Any],
         store_data: dict[str, object] | None = None,
+        settlement: _CatalogSettlement | None = None,
     ) -> _CatalogStore | None:
         data = store_data if isinstance(store_data, dict) else self._extract_store_components(record, payload=payload)
         if not isinstance(data, dict):
@@ -1441,6 +1444,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
         observed_at = self._to_utc(record.observed_at)
         now = _utc_now()
+        settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
         row = self._get_cached_store_row(session, store_key=store_key)
 
         if row is None:
@@ -1460,6 +1464,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 temporarily_closed=self._to_bool(data.get("temporarily_closed")),
                 longitude=_as_float(data.get("longitude")),
                 latitude=_as_float(data.get("latitude")),
+                settlement_id=settlement_id,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
                 updated_at=now,
@@ -1510,6 +1515,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             row.longitude = _as_float(data.get("longitude"))
         if _is_missing(row.latitude):
             row.latitude = _as_float(data.get("latitude"))
+        self._fill_missing(row, "settlement_id", settlement_id)
         return row
 
     def _upsert_settlement(

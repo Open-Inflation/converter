@@ -231,6 +231,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("address", store_columns)
                 self.assertIn("longitude", store_columns)
                 self.assertIn("latitude", store_columns)
+                self.assertIn("settlement_id", store_columns)
 
                 tables = {
                     str(row["name"])
@@ -475,7 +476,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("2026-02-28", str(snapshot["valid_to_at"]))
                 store = conn.execute(
                     """
-                    SELECT source, retail_type, code, address
+                    SELECT source, retail_type, code, address, settlement_id
                     FROM catalog_stores
                     WHERE id = ?
                     """,
@@ -487,6 +488,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(store["retail_type"], "offline")
                 self.assertEqual(store["code"], "store-701")
                 self.assertEqual(store["address"], "Невский пр., 1")
+                self.assertIsNone(store["settlement_id"])
                 snapshot_payload_table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_payload_nodes'"
                 ).fetchone()
@@ -1076,7 +1078,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT name, region, country, latitude, longitude, geo_point FROM catalog_settlements"
+                    "SELECT id, name, region, country, latitude, longitude, geo_point FROM catalog_settlements"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
                 self.assertEqual(settlement["name"], "Санкт-Петербург")
@@ -1085,6 +1087,12 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
                 self.assertIsNotNone(settlement["geo_point"])
+                store = conn.execute(
+                    "SELECT settlement_id FROM catalog_stores ORDER BY id ASC LIMIT 1"
+                ).fetchone()
+                self.assertIsNotNone(store)
+                assert store is not None
+                self.assertEqual(int(store["settlement_id"]), int(settlement["id"]))
 
                 category_rows = conn.execute(
                     "SELECT source_uid, title, depth FROM catalog_categories ORDER BY depth ASC"

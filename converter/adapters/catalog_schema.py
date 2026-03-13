@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Enum,
+    ForeignKey,
     Float,
     Index,
     Integer,
@@ -253,6 +254,12 @@ class _CatalogStore(_CatalogBase):
     temporarily_closed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    settlement_id: Mapped[int | None] = mapped_column(
+        _bigint_sqlite(),
+        ForeignKey("catalog_settlements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

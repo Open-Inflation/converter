@@ -122,6 +122,7 @@ Constraints/indexes:
 | `temporarily_closed` | `BOOLEAN` | yes | Временное закрытие |
 | `longitude` | `FLOAT` | yes | Долгота |
 | `latitude` | `FLOAT` | yes | Широта |
+| `settlement_id` | `BIGINT` | yes | Связь с `catalog_settlements.id` |
 | `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
 | `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
 | `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
@@ -129,7 +130,8 @@ Constraints/indexes:
 Constraints/indexes:
 - `PK(id)`
 - `UNIQUE(store_key)`
-- Indexes: `parser_name`, `code`, `(parser_name, source, code)`
+- FK: `settlement_id -> catalog_settlements.id` (`ON DELETE SET NULL`)
+- Indexes: `parser_name`, `code`, `settlement_id`, `(parser_name, source, code)`
 
 ### `catalog_product_sources`
 

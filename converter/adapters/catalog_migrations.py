@@ -133,6 +133,7 @@ class _CatalogSchemaMigrationMixin:
             "temporarily_closed",
             "longitude",
             "latitude",
+            "settlement_id",
             "first_seen_at",
             "last_seen_at",
             "updated_at",
