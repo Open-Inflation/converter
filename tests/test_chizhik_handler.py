@@ -90,6 +90,11 @@ class ChizhikHandlerTests(unittest.TestCase):
 
         self.assertEqual(result, "напиток сок")
 
+    def test_composition_normalization_lemmatizes_and_removes_stopwords(self) -> None:
+        result = self.handler.normalize_composition("Сахар, какао и молоко")
+
+        self.assertEqual(result, "сахар какао молоко")
+
 
 class ChizhikPipelineIntegrationTests(unittest.TestCase):
     def test_default_pipeline_resolves_chizhik_handler(self) -> None:

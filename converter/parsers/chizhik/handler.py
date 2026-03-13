@@ -80,3 +80,14 @@ class ChizhikHandler(BaseParserHandler):
             return None
 
         return normalize_category_text(normalized, text_normalizer=self._text_normalizer)
+
+    def normalize_composition(self, composition: str | None) -> str | None:
+        normalized = super().normalize_composition(composition)
+        if normalized is None:
+            return None
+
+        lemmatized = self._text_normalizer.lemmatize(normalized)
+        if not lemmatized:
+            return None
+        without_stopwords = self._text_normalizer.remove_stopwords(lemmatized)
+        return without_stopwords or lemmatized

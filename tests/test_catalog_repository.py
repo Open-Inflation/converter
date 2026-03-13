@@ -590,7 +590,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             self.assertEqual(second_norm.category_normalized, "продукт")
             self.assertEqual(second_norm.geo_normalized, "санкт-петербург")
             self.assertEqual(second_norm.composition_original, "Сахар, какао, молоко")
-            self.assertEqual(second_norm.composition_normalized, "сахар, какао, молоко")
+            self.assertEqual(second_norm.composition_normalized, "сахар какао молоко")
 
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
@@ -612,7 +612,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(len(rows), 2)
                 self.assertEqual(rows[0]["canonical_product_id"], rows[1]["canonical_product_id"])
                 self.assertEqual(rows[1]["composition_original"], "Сахар, какао, молоко")
-                self.assertEqual(rows[1]["composition_normalized"], "сахар, какао, молоко")
+                self.assertEqual(rows[1]["composition_normalized"], "сахар какао молоко")
                 self.assertIsNotNone(rows[0]["primary_category_id"])
                 self.assertIsNotNone(rows[0]["settlement_id"])
 

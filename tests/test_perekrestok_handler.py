@@ -61,6 +61,11 @@ class PerekrestokHandlerTests(unittest.TestCase):
 
         self.assertEqual(result, "напиток сок")
 
+    def test_composition_normalization_lemmatizes_and_removes_stopwords(self) -> None:
+        result = self.handler.normalize_composition("Сахар, какао и молоко")
+
+        self.assertEqual(result, "сахар какао молоко")
+
 
 class PerekrestokPipelineIntegrationTests(unittest.TestCase):
     def test_default_pipeline_resolves_perekrestok_handler(self) -> None:

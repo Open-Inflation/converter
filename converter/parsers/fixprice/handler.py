@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 from converter.core.base import BaseParserHandler
 from converter.core.models import NormalizedProductRecord, RawProductRecord, TitleNormalizationResult
 from converter.parsers.category_normalization import normalize_category_text
@@ -9,8 +7,6 @@ from converter.parsers.normalizers import RussianTextNormalizer
 
 from .patterns import DIM_CM_RE, DIM_GENERIC_RE, WVL_RE
 from .title_parser import FixPriceTitleParser
-
-_COMMA_SPACES_RE = re.compile(r"\s*,\s*")
 
 
 class FixPriceHandler(BaseParserHandler):
@@ -43,4 +39,8 @@ class FixPriceHandler(BaseParserHandler):
         if normalized is None:
             return None
 
-        return _COMMA_SPACES_RE.sub(", ", normalized)
+        lemmatized = self._text_normalizer.lemmatize(normalized)
+        if not lemmatized:
+            return None
+        without_stopwords = self._text_normalizer.remove_stopwords(lemmatized)
+        return without_stopwords or lemmatized

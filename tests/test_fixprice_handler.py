@@ -85,6 +85,11 @@ class FixPriceHandlerTests(unittest.TestCase):
 
         self.assertEqual(result, "молочный продукт яйцо")
 
+    def test_composition_normalization_lemmatizes_and_removes_stopwords(self) -> None:
+        result = self.handler.normalize_composition("Сахар, какао и молоко")
+
+        self.assertEqual(result, "сахар какао молоко")
+
     def test_category_normalization_removes_stopwords(self) -> None:
         result = self.handler.normalize_category("напитки и соки")
 
@@ -126,7 +131,7 @@ class PipelineBackfillTests(unittest.TestCase):
         self.assertEqual(second.category_normalized, "продукт")
         self.assertEqual(second.geo_normalized, "санкт-петербург")
         self.assertEqual(second.composition_original, "Сахар, какао, молоко")
-        self.assertEqual(second.composition_normalized, "сахар, какао, молоко")
+        self.assertEqual(second.composition_normalized, "сахар какао молоко")
 
     def test_pipeline_does_not_merge_different_sku_by_normalized_name(self) -> None:
         pipeline = build_default_pipeline()
