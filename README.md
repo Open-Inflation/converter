@@ -9,7 +9,7 @@
 - Отдельные модули `parsers/fixprice`, `parsers/chizhik`, `parsers/perekrestok` с parser-specific title обработчиками.
 - Пайплайн `ConverterPipeline`:
   - обработчик парсера,
-  - резолв canonical product id (`plu/sku/source_id + parser`),
+  - резолв canonical product id (`plu/sku/source_id + parser`, fallback по normalized title только если нет `plu/sku`),
   - persistent image dedup,
   - backfill `NULL` полей по ближайшей версии товара во времени.
 

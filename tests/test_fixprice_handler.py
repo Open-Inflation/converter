@@ -114,6 +114,50 @@ class PipelineBackfillTests(unittest.TestCase):
         self.assertEqual(second.composition_original, "Сахар, какао, молоко")
         self.assertEqual(second.composition_normalized, "сахар, какао, молоко")
 
+    def test_pipeline_does_not_merge_different_sku_by_normalized_name(self) -> None:
+        pipeline = build_default_pipeline()
+
+        first = RawProductRecord(
+            parser_name="fixprice",
+            sku="5093200",
+            source_id="receiver:run-1:1",
+            title="Тарелка десертная O`Kit",
+            observed_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )
+        second = RawProductRecord(
+            parser_name="fixprice",
+            sku="5093201",
+            source_id="receiver:run-1:2",
+            title="Тарелка десертная O`Kit",
+            observed_at=datetime(2026, 2, 2, tzinfo=timezone.utc),
+        )
+
+        first_norm = pipeline.process_one(first)
+        second_norm = pipeline.process_one(second)
+
+        self.assertNotEqual(first_norm.canonical_product_id, second_norm.canonical_product_id)
+
+    def test_pipeline_merges_by_normalized_name_when_plu_and_sku_missing(self) -> None:
+        pipeline = build_default_pipeline()
+
+        first = RawProductRecord(
+            parser_name="fixprice",
+            source_id="receiver:run-1:1",
+            title="Тарелка десертная O`Kit",
+            observed_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        )
+        second = RawProductRecord(
+            parser_name="fixprice",
+            source_id="receiver:run-2:2",
+            title="Тарелка десертная O`Kit",
+            observed_at=datetime(2026, 2, 2, tzinfo=timezone.utc),
+        )
+
+        first_norm = pipeline.process_one(first)
+        second_norm = pipeline.process_one(second)
+
+        self.assertEqual(first_norm.canonical_product_id, second_norm.canonical_product_id)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -282,9 +282,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 if token is None:
                     continue
                 identity_keys.add((parser_name, identity_type, token))
-            fallback_identity = self._fallback_identity_value(record)
-            if fallback_identity is not None:
-                identity_keys.add((parser_name, "normalized_name", fallback_identity))
+            if not self._has_strong_identity(record):
+                fallback_identity = self._fallback_identity_value(record)
+                if fallback_identity is not None:
+                    identity_keys.add((parser_name, "normalized_name", fallback_identity))
 
         key_list = sorted(identity_keys)
         cache: dict[tuple[str, str, str], _CatalogIdentityMap | None] = {
@@ -756,6 +757,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     def _resolve_canonical_product_id(self, session: Session, record: NormalizedProductRecord) -> str:
         parser_name = record.parser_name.strip().lower()
         identity_keys = record.identity_candidates()
+        allow_normalized_fallback = not self._has_strong_identity(record)
 
         chosen_id: str | None = None
         for identity_type, identity_value in identity_keys:
@@ -770,7 +772,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 break
 
         fallback_identity = self._fallback_identity_value(record)
-        if chosen_id is None and fallback_identity is not None:
+        if chosen_id is None and allow_normalized_fallback and fallback_identity is not None:
             row = self._get_identity_map_row(
                 session,
                 parser_name=parser_name,
@@ -784,7 +786,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             chosen_id = str(uuid4())
 
         identity_values = list(identity_keys)
-        if fallback_identity is not None:
+        if allow_normalized_fallback and fallback_identity is not None:
             identity_values.append(("normalized_name", fallback_identity))
         identity_values = list(dict.fromkeys(identity_values))
 
@@ -1072,6 +1074,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if fallback:
             return fallback
         return _safe_str(record.title_normalized)
+
+    @staticmethod
+    def _has_strong_identity(record: NormalizedProductRecord) -> bool:
+        return _safe_str(record.plu) is not None or _safe_str(record.sku) is not None
 
     def _apply_persistent_image_dedup(self, session: Session, record: NormalizedProductRecord) -> None:
         original_image_count = len(record.image_urls)

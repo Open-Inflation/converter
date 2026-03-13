@@ -208,6 +208,7 @@ Constraints/indexes:
 ### `catalog_identity_map`
 
 Map идентичности товара: `(parser_name, identity_type, identity_value) -> canonical_product_id`.
+`normalized_name` используется только как fallback для записей без `plu` и `sku`.
 
 | Column | Type (PostgreSQL) | Null | Notes |
 |---|---|---:|---|

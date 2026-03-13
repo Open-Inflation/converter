@@ -42,7 +42,8 @@ class UrlStringHasher:
 class InMemoryProductIdentityResolver:
     """
     Canonical product identity resolver.
-    Priority: parser + plu -> parser + sku -> parser + source_id -> parser + normalized name.
+    Priority: parser + plu -> parser + sku -> parser + source_id.
+    Fallback parser + normalized name is used only when both plu and sku are missing.
     """
 
     def __init__(self) -> None:
@@ -50,30 +51,41 @@ class InMemoryProductIdentityResolver:
 
     def resolve(self, record: NormalizedProductRecord) -> str:
         parser_name = record.parser_name
+        identity_candidates = record.identity_candidates()
 
-        for id_type, id_value in record.identity_candidates():
+        for id_type, id_value in identity_candidates:
             key = (parser_name, id_type, id_value)
             existing = self._index.get(key)
             if existing:
                 return existing
 
-        fallback_key = (
-            parser_name,
-            "normalized_name",
-            record.title_normalized_no_stopwords,
-        )
-        existing = self._index.get(fallback_key)
-        if existing:
-            for id_type, id_value in record.identity_candidates():
-                self._index[(parser_name, id_type, id_value)] = existing
-            return existing
+        use_fallback = not self._has_strong_identity(record)
+        fallback_key: tuple[str, str, str] | None = None
+        if use_fallback:
+            fallback_key = (
+                parser_name,
+                "normalized_name",
+                record.title_normalized_no_stopwords,
+            )
+            existing = self._index.get(fallback_key)
+            if existing:
+                for id_type, id_value in identity_candidates:
+                    self._index[(parser_name, id_type, id_value)] = existing
+                return existing
 
         product_id = str(uuid4())
-        self._index[fallback_key] = product_id
-        for id_type, id_value in record.identity_candidates():
+        if fallback_key is not None:
+            self._index[fallback_key] = product_id
+        for id_type, id_value in identity_candidates:
             self._index[(parser_name, id_type, id_value)] = product_id
 
         return product_id
+
+    @staticmethod
+    def _has_strong_identity(record: NormalizedProductRecord) -> bool:
+        plu = (record.plu or "").strip()
+        sku = (record.sku or "").strip()
+        return bool(plu or sku)
 
 
 class NullBackfillService:
