@@ -95,6 +95,25 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         return [str(row["value"]) for row in rows]
 
     @staticmethod
+    def _asset_kinds(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        id_column: str,
+        row_id: int,
+    ) -> list[str]:
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT asset_kind
+            FROM {table}
+            WHERE {id_column} = ?
+            ORDER BY asset_kind ASC
+            """,
+            (row_id,),
+        ).fetchall()
+        return [str(row["asset_kind"]) for row in rows]
+
+    @staticmethod
     def _make_chunk_record(
         idx: int,
         *,
@@ -1332,6 +1351,30 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             self.assertEqual(outbox_result["deleted"], 1)
             self.assertEqual(outbox_result["failed"], 0)
             self.assertEqual(storage.deleted_batches, [["http://storage.local/images_permanent/dup.webp"]])
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                product_row = conn.execute(
+                    """
+                    SELECT id
+                    FROM catalog_products
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:run-dup:1"),
+                ).fetchone()
+                self.assertIsNotNone(product_row)
+                assert product_row is not None
+                self.assertEqual(
+                    self._asset_kinds(
+                        conn,
+                        table="catalog_product_assets",
+                        id_column="product_id",
+                        row_id=int(product_row["id"]),
+                    ),
+                    ["image_url"],
+                )
+            finally:
+                conn.close()
         finally:
             db_path.unlink(missing_ok=True)
 

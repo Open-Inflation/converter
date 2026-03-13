@@ -2145,8 +2145,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     def _iter_asset_values(record: NormalizedProductRecord) -> list[tuple[str, list[str]]]:
         return [
             ("image_url", list(record.image_urls)),
-            ("duplicate_image_url", list(record.duplicate_image_urls)),
-            ("image_fingerprint", list(record.image_fingerprints)),
         ]
 
     @staticmethod

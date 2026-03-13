@@ -21,6 +21,9 @@
 - `duplicate_image_url`
 - `image_fingerprint`
 
+`converter` в текущем runtime записывает в `catalog_product_assets` только `asset_kind = image_url`.
+Значения `duplicate_image_url` и `image_fingerprint` сохранены в enum для совместимости схемы.
+
 ### `catalog_products`
 
 Текущая read-model проекция товара (одна строка на `(parser_name, source_id)`).
@@ -238,7 +241,7 @@ Constraints/indexes:
 |---|---|---:|---|
 | `id` | `BIGINT` | no | PK, autoincrement |
 | `product_id` | `BIGINT` | no | ID из `catalog_products` |
-| `asset_kind` | `catalog_product_asset_kind_enum` | no | Тип asset |
+| `asset_kind` | `catalog_product_asset_kind_enum` | no | Тип asset (`converter` пишет `image_url`) |
 | `sort_order` | `BIGINT` | no | Позиция в списке |
 | `value` | `TEXT` | no | Значение asset |
 | `created_at` | `TIMESTAMPTZ` | no | Время создания |
