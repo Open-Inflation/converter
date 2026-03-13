@@ -139,10 +139,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_products)").fetchall()
                 }
-                product_types = {
-                    str(row["name"]): str(row["type"]).upper()
-                    for row in conn.execute("PRAGMA table_info(catalog_products)").fetchall()
-                }
                 snapshot_columns = {
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
@@ -151,34 +147,32 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"]): str(row["type"]).upper()
                     for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
                 }
+                store_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_stores)").fetchall()
+                }
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
-                self.assertIn("price", product_columns)
                 self.assertIn("composition_original", product_columns)
                 self.assertNotIn("title_normalized", product_columns)
                 self.assertNotIn("title_original_no_stopwords", product_columns)
+                self.assertNotIn("price", product_columns)
+                self.assertNotIn("discount_price", product_columns)
+                self.assertNotIn("loyal_price", product_columns)
+                self.assertNotIn("price_unit", product_columns)
+                self.assertNotIn("available_count", product_columns)
                 self.assertNotIn("source_payload_json", product_columns)
                 self.assertNotIn("image_urls_json", product_columns)
                 self.assertNotIn("duplicate_image_urls_json", product_columns)
                 self.assertNotIn("image_fingerprints_json", product_columns)
-                self.assertTrue(
-                    "DECIMAL" in product_types["price"] or "NUMERIC" in product_types["price"]
-                )
-                self.assertTrue(
-                    "DECIMAL" in product_types["discount_price"]
-                    or "NUMERIC" in product_types["discount_price"]
-                )
-                self.assertTrue(
-                    "DECIMAL" in product_types["loyal_price"]
-                    or "NUMERIC" in product_types["loyal_price"]
-                )
 
                 self.assertIn("price", snapshot_columns)
                 self.assertIn("discount_price", snapshot_columns)
                 self.assertIn("loyal_price", snapshot_columns)
                 self.assertIn("price_unit", snapshot_columns)
                 self.assertIn("available_count", snapshot_columns)
+                self.assertIn("store_id", snapshot_columns)
                 self.assertIn("canonical_product_id", snapshot_columns)
                 self.assertIn("parser_name", snapshot_columns)
                 self.assertIn("source_id", snapshot_columns)
@@ -211,6 +205,13 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     "DECIMAL" in snapshot_types["loyal_price"]
                     or "NUMERIC" in snapshot_types["loyal_price"]
                 )
+                self.assertIn("store_key", store_columns)
+                self.assertIn("parser_name", store_columns)
+                self.assertIn("source", store_columns)
+                self.assertIn("code", store_columns)
+                self.assertIn("address", store_columns)
+                self.assertIn("longitude", store_columns)
+                self.assertIn("latitude", store_columns)
 
                 tables = {
                     str(row["name"])
@@ -220,6 +221,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 }
                 self.assertIn("catalog_product_assets", tables)
                 self.assertIn("catalog_product_snapshots", tables)
+                self.assertIn("catalog_stores", tables)
                 self.assertNotIn("catalog_snapshot_events", tables)
                 self.assertNotIn("catalog_snapshot_available_counts", tables)
                 self.assertNotIn("catalog_snapshot_assets", tables)
@@ -355,6 +357,16 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             observed_at = datetime(2026, 2, 28, tzinfo=timezone.utc)
             payload = {
                 "receiver_product_id": 501,
+                "receiver_artifact_id": 701,
+                "receiver_source": "api",
+                "receiver_artifact": {
+                    "source": "api",
+                    "retail_type": "offline",
+                    "code": "store-701",
+                    "address": "Невский пр., 1",
+                    "longitude": 30.31413,
+                    "latitude": 59.93863,
+                },
                 "receiver_product": {
                     "price": 199.9,
                     "discount_price": 149.9,
@@ -393,7 +405,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 product = conn.execute(
                     """
-                    SELECT id, price, discount_price, loyal_price, price_unit, description
+                    SELECT id, description
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -401,10 +413,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(product)
                 assert product is not None
-                self.assertAlmostEqual(float(product["price"]), 199.9, places=3)
-                self.assertAlmostEqual(float(product["discount_price"]), 149.9, places=3)
-                self.assertAlmostEqual(float(product["loyal_price"]), 129.9, places=3)
-                self.assertEqual(product["price_unit"], "RUB")
                 self.assertEqual(product["description"], "Тестовое описание")
                 self.assertEqual(
                     self._asset_values(
@@ -426,6 +434,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                         loyal_price,
                         price_unit,
                         available_count,
+                        store_id,
                         valid_from_at,
                         valid_to_at,
                         created_at
@@ -441,9 +450,24 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(snapshot["loyal_price"]), 129.9, places=3)
                 self.assertEqual(snapshot["price_unit"], "RUB")
                 self.assertAlmostEqual(float(snapshot["available_count"]), 1.0, places=3)
+                self.assertIsNotNone(snapshot["store_id"])
                 self.assertIn("2026-02-28", str(snapshot["created_at"]))
                 self.assertIn("2026-02-28", str(snapshot["valid_from_at"]))
                 self.assertIn("2026-02-28", str(snapshot["valid_to_at"]))
+                store = conn.execute(
+                    """
+                    SELECT source, retail_type, code, address
+                    FROM catalog_stores
+                    WHERE id = ?
+                    """,
+                    (int(snapshot["store_id"]),),
+                ).fetchone()
+                self.assertIsNotNone(store)
+                assert store is not None
+                self.assertEqual(store["source"], "api")
+                self.assertEqual(store["retail_type"], "offline")
+                self.assertEqual(store["code"], "store-701")
+                self.assertEqual(store["address"], "Невский пр., 1")
                 snapshot_payload_table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_payload_nodes'"
                 ).fetchone()
@@ -786,7 +810,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 source_payload={
                     "receiver_run_id": "run-2",
                     "receiver_product_id": 1002,
-                    "receiver_artifact_id": 2002,
+                    "receiver_artifact_id": 2001,
                 },
             )
 
@@ -890,6 +914,95 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 assert product is not None
                 self.assertEqual(product["brand"], "Brand-2")
                 self.assertEqual(product["description"], "Описание 2")
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_creates_separate_snapshots_for_different_stores(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed = datetime(2026, 2, 28, 12, 0, tzinfo=timezone.utc)
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Йогурт",
+                title_normalized="йогурт",
+                title_original_no_stopwords="йогурт",
+                title_normalized_no_stopwords="йогурт",
+                brand="Brand",
+                unit="PCE",
+                available_count=3.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:store-split:1",
+                sku="store-split-1",
+                price=79.9,
+                discount_price=69.9,
+                loyal_price=59.9,
+                price_unit="RUB",
+                observed_at=observed,
+                source_payload={
+                    "receiver_run_id": "run-store-1",
+                    "receiver_product_id": 1,
+                    "receiver_artifact_id": 9101,
+                    "receiver_source": "api",
+                    "receiver_artifact": {
+                        "source": "api",
+                        "code": "store-1",
+                        "address": "Store 1",
+                    },
+                },
+            )
+            second = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Йогурт",
+                title_normalized="йогурт",
+                title_original_no_stopwords="йогурт",
+                title_normalized_no_stopwords="йогурт",
+                brand="Brand",
+                unit="PCE",
+                available_count=3.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:store-split:1",
+                sku="store-split-1",
+                price=79.9,
+                discount_price=69.9,
+                loyal_price=59.9,
+                price_unit="RUB",
+                observed_at=observed,
+                source_payload={
+                    "receiver_run_id": "run-store-2",
+                    "receiver_product_id": 2,
+                    "receiver_artifact_id": 9102,
+                    "receiver_source": "api",
+                    "receiver_artifact": {
+                        "source": "api",
+                        "code": "store-2",
+                        "address": "Store 2",
+                    },
+                },
+            )
+
+            repo.upsert_many([first])
+            repo.upsert_many([second])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                snapshots = conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt, COUNT(DISTINCT store_id) AS store_cnt
+                    FROM catalog_product_snapshots
+                    WHERE parser_name = ? AND source_id = ?
+                    """,
+                    ("fixprice", "receiver:store-split:1"),
+                ).fetchone()
+                self.assertIsNotNone(snapshots)
+                assert snapshots is not None
+                self.assertEqual(int(snapshots["cnt"]), 2)
+                self.assertEqual(int(snapshots["store_cnt"]), 2)
             finally:
                 conn.close()
         finally:

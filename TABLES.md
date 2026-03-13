@@ -43,10 +43,6 @@
 | `expiration_date_in_days` | `INTEGER` | yes | Срок годности в днях |
 | `rating` | `FLOAT` | yes | Рейтинг |
 | `reviews_count` | `INTEGER` | yes | Число отзывов |
-| `price` | `NUMERIC(12,4)` | yes | Цена |
-| `discount_price` | `NUMERIC(12,4)` | yes | Цена со скидкой |
-| `loyal_price` | `NUMERIC(12,4)` | yes | Лояльная цена |
-| `price_unit` | `VARCHAR(32)` | yes | Валюта/единица цены |
 | `adult` | `BOOLEAN` | yes | 18+ |
 | `is_new` | `BOOLEAN` | yes | Новинка |
 | `promo` | `BOOLEAN` | yes | Промо |
@@ -54,7 +50,6 @@
 | `hit` | `BOOLEAN` | yes | Хит |
 | `data_matrix` | `BOOLEAN` | yes | Флаг data matrix |
 | `unit` | `VARCHAR(32)` | no | Единица измерения |
-| `available_count` | `FLOAT` | yes | Наличие |
 | `package_quantity` | `FLOAT` | yes | Кол-во в упаковке |
 | `package_unit` | `VARCHAR(32)` | yes | Единица упаковки |
 | `primary_category_id` | `BIGINT` | yes | Основная категория (только current-state) |
@@ -83,6 +78,7 @@ Constraints/indexes:
 | `source_run_id` | `VARCHAR(64)` | yes | Run ID из receiver payload |
 | `receiver_product_id` | `BIGINT` | yes | ID продукта в receiver |
 | `receiver_artifact_id` | `BIGINT` | yes | ID артефакта в receiver |
+| `store_id` | `BIGINT` | yes | ID магазина из `catalog_stores` |
 | `receiver_sort_order` | `BIGINT` | yes | Sort order из receiver |
 | `source_event_uid` | `VARCHAR(191)` | yes | Дедуп событий snapshot |
 | `content_fingerprint` | `VARCHAR(64)` | yes | Fingerprint контента snapshot |
@@ -99,7 +95,38 @@ Constraints/indexes:
 Constraints/indexes:
 - `PK(id)`
 - `UNIQUE(source_event_uid)` (`uq_cps_event`)
-- Indexes: `canonical_product_id`, `parser_name`, `source_id`, `source_event_uid`, `content_fingerprint`, `valid_from_at`, `valid_to_at`, `observed_at`, `created_at`
+- Indexes: `canonical_product_id`, `parser_name`, `source_id`, `store_id`, `source_event_uid`, `content_fingerprint`, `valid_from_at`, `valid_to_at`, `observed_at`, `created_at`
+
+### `catalog_stores`
+
+Справочник магазинов/точек продаж, которые приходят из `receiver_artifact`.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `id` | `BIGINT` | no | PK, autoincrement |
+| `store_key` | `VARCHAR(191)` | no | Уникальный стабильный ключ магазина |
+| `parser_name` | `VARCHAR(64)` | no | Парсер |
+| `source` | `VARCHAR(64)` | yes | Источник (`artifact.source`) |
+| `retail_type` | `VARCHAR(64)` | yes | Тип retail |
+| `code` | `VARCHAR(128)` | yes | Код магазина |
+| `address` | `TEXT` | yes | Адрес |
+| `schedule_weekdays_open_from` | `VARCHAR(16)` | yes | Будни: открытие |
+| `schedule_weekdays_closed_from` | `VARCHAR(16)` | yes | Будни: закрытие |
+| `schedule_saturday_open_from` | `VARCHAR(16)` | yes | Суббота: открытие |
+| `schedule_saturday_closed_from` | `VARCHAR(16)` | yes | Суббота: закрытие |
+| `schedule_sunday_open_from` | `VARCHAR(16)` | yes | Воскресенье: открытие |
+| `schedule_sunday_closed_from` | `VARCHAR(16)` | yes | Воскресенье: закрытие |
+| `temporarily_closed` | `BOOLEAN` | yes | Временное закрытие |
+| `longitude` | `FLOAT` | yes | Долгота |
+| `latitude` | `FLOAT` | yes | Широта |
+| `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
+| `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
+| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
+
+Constraints/indexes:
+- `PK(id)`
+- `UNIQUE(store_key)`
+- Indexes: `parser_name`, `code`, `(parser_name, source, code)`
 
 ### `catalog_product_sources`
 

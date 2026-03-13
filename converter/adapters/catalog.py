@@ -38,6 +38,7 @@ from .catalog_schema import (
     _CatalogProductSnapshot,
     _CatalogProductSource,
     _CatalogSettlement,
+    _CatalogStore,
     _CatalogStorageDeleteOutbox,
     _as_float,
     _is_missing,
@@ -54,6 +55,7 @@ class _PreparedChunkRecord:
     parser_name: str
     source_id: str
     payload: dict[str, Any]
+    store_data: dict[str, object] | None
     snapshot_fingerprint: str
     source_event_uid: str
 
@@ -159,10 +161,17 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     record = prepared.record
                     counters["upserted_products"] += 1
 
+                    store = self._upsert_store(
+                        session,
+                        record,
+                        payload=prepared.payload,
+                        store_data=prepared.store_data,
+                    )
                     touched_snapshot = self._touch_latest_snapshot_if_unchanged(
                         session,
                         record,
                         snapshot_fingerprint=prepared.snapshot_fingerprint,
+                        store=store,
                     )
                     settlement = self._upsert_settlement(session, record, payload=prepared.payload)
                     categories = self._upsert_categories(session, record, payload=prepared.payload)
@@ -179,6 +188,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                             session,
                             record,
                             payload=prepared.payload,
+                            store=store,
                             snapshot_fingerprint=prepared.snapshot_fingerprint,
                             source_event_uid=prepared.source_event_uid,
                         )
@@ -236,14 +246,24 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
             self._apply_persistent_image_dedup(session, record)
             payload = self._source_payload(record)
+            store_data = self._extract_store_components(record, payload=payload)
             prepared.append(
                 _PreparedChunkRecord(
                     record=record,
                     parser_name=record.parser_name.strip().lower(),
                     source_id=self._source_id(record),
                     payload=payload,
-                    snapshot_fingerprint=self._snapshot_content_fingerprint(record, payload=payload),
-                    source_event_uid=self._source_event_uid(record, payload=payload),
+                    store_data=store_data,
+                    snapshot_fingerprint=self._snapshot_content_fingerprint(
+                        record,
+                        payload=payload,
+                        store_key=_safe_str(store_data.get("store_key")) if isinstance(store_data, dict) else None,
+                    ),
+                    source_event_uid=self._source_event_uid(
+                        record,
+                        payload=payload,
+                        store_key=_safe_str(store_data.get("store_key")) if isinstance(store_data, dict) else None,
+                    ),
                 )
             )
         return prepared
@@ -348,6 +368,27 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 if event_uid is not None:
                     snapshot_event_cache[event_uid] = row
         session.info["_catalog_snapshot_event_cache"] = snapshot_event_cache
+
+        store_keys = sorted(
+            {
+                store_key
+                for item in prepared_records
+                for store_key in [
+                    _safe_str(item.store_data.get("store_key"))
+                    if isinstance(item.store_data, dict)
+                    else None
+                ]
+                if store_key is not None
+            }
+        )
+        store_cache: dict[str, _CatalogStore | None] = {key: None for key in store_keys}
+        if store_keys:
+            store_rows = session.scalars(
+                select(_CatalogStore).where(_CatalogStore.store_key.in_(store_keys))
+            ).all()
+            for row in store_rows:
+                store_cache[row.store_key] = row
+        session.info["_catalog_store_cache"] = store_cache
 
         settlement_keys_set: set[str] = set()
         for item in prepared_records:
@@ -540,6 +581,33 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if isinstance(cached, dict):
             cached[event_uid] = row
 
+    @staticmethod
+    def _get_cached_store_row(
+        session: Session,
+        *,
+        store_key: str,
+    ) -> _CatalogStore | None:
+        cached = session.info.get("_catalog_store_cache")
+        if isinstance(cached, dict) and store_key in cached:
+            value = cached[store_key]
+            return value if isinstance(value, _CatalogStore) else None
+
+        row = CatalogRepository._get_store_row(session, store_key)
+        if isinstance(cached, dict):
+            cached[store_key] = row
+        return row
+
+    @staticmethod
+    def _cache_store_row(
+        session: Session,
+        *,
+        store_key: str,
+        row: _CatalogStore | None,
+    ) -> None:
+        cached = session.info.get("_catalog_store_cache")
+        if isinstance(cached, dict):
+            cached[store_key] = row
+
     def _run_write_transaction(
         self,
         work: Callable[[Session], None],
@@ -613,13 +681,30 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             self._apply_backfill(session, record)
 
             payload = self._source_payload(record)
-            snapshot_fingerprint = self._snapshot_content_fingerprint(record, payload=payload)
-            source_event_uid = self._source_event_uid(record, payload=payload)
+            store_data = self._extract_store_components(record, payload=payload)
+            store_key = _safe_str(store_data.get("store_key")) if isinstance(store_data, dict) else None
+            store = self._upsert_store(
+                session,
+                record,
+                payload=payload,
+                store_data=store_data,
+            )
+            snapshot_fingerprint = self._snapshot_content_fingerprint(
+                record,
+                payload=payload,
+                store_key=store_key,
+            )
+            source_event_uid = self._source_event_uid(
+                record,
+                payload=payload,
+                store_key=store_key,
+            )
 
             touched_snapshot = self._touch_latest_snapshot_if_unchanged(
                 session,
                 record,
                 snapshot_fingerprint=snapshot_fingerprint,
+                store=store,
             )
 
             settlement = self._upsert_settlement(session, record, payload=payload)
@@ -635,6 +720,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     session,
                     record,
                     payload=payload,
+                    store=store,
                     snapshot_fingerprint=snapshot_fingerprint,
                     source_event_uid=source_event_uid,
                 )
@@ -732,11 +818,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         record: NormalizedProductRecord,
         *,
         payload: dict[str, Any],
+        store_key: str | None = None,
     ) -> str:
         source_id = self._source_id(record)
+        resolved_store_key = store_key or self._store_key(record, payload=payload)
         fingerprint_input = {
             "parser_name": record.parser_name.strip().lower(),
             "source_id": source_id,
+            "store_key": resolved_store_key,
             "price": record.price,
             "discount_price": record.discount_price,
             "loyal_price": record.loyal_price,
@@ -756,13 +845,16 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         record: NormalizedProductRecord,
         *,
         payload: dict[str, Any],
+        store_key: str | None = None,
     ) -> str:
         receiver_product_id = self._to_int(payload.get("receiver_product_id")) or 0
         receiver_artifact_id = self._to_int(payload.get("receiver_artifact_id")) or 0
+        resolved_store_key = store_key or self._store_key(record, payload=payload) or ""
         seed = "|".join(
             (
                 record.parser_name.strip().lower(),
                 self._source_id(record),
+                resolved_store_key,
                 self._to_utc(record.observed_at).isoformat(),
                 str(receiver_product_id),
                 str(receiver_artifact_id),
@@ -795,6 +887,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         record: NormalizedProductRecord,
         *,
         snapshot_fingerprint: str,
+        store: _CatalogStore | None = None,
     ) -> bool:
         parser_name = record.parser_name.strip().lower()
         source_id = self._source_id(record)
@@ -827,6 +920,15 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             snapshot.valid_to_at = snapshot.observed_at
         snapshot.valid_to_at = self._max_datetime(snapshot.valid_to_at, observed_at)
         snapshot.observed_at = self._max_datetime(snapshot.observed_at, observed_at)
+        if store is not None:
+            if store.id is None:
+                session.flush([store])
+            if store.id is not None:
+                snapshot.store_id = int(store.id)
+        snapshot.price = record.price
+        snapshot.discount_price = record.discount_price
+        snapshot.loyal_price = record.loyal_price
+        snapshot.price_unit = record.price_unit
         snapshot.available_count = record.available_count
 
         if _safe_str(source.canonical_product_id):
@@ -1205,11 +1307,18 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         record: NormalizedProductRecord,
         *,
         payload: dict[str, Any],
+        store: _CatalogStore | None,
         snapshot_fingerprint: str,
         source_event_uid: str | None,
     ) -> tuple[_CatalogProductSnapshot, bool]:
         observed_at = self._to_utc(record.observed_at)
         event_uid = _safe_str(source_event_uid)
+        store_id: int | None = None
+        if store is not None:
+            if store.id is None:
+                session.flush([store])
+            if store.id is not None:
+                store_id = int(store.id)
 
         if event_uid is not None:
             existing = self._get_cached_snapshot_by_event_uid(
@@ -1226,6 +1335,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 existing.loyal_price = record.loyal_price
                 existing.price_unit = record.price_unit
                 existing.available_count = record.available_count
+                if store_id is not None:
+                    existing.store_id = store_id
                 if existing.id is not None:
                     self._cache_snapshot_by_id(session, int(existing.id), existing)
                 return existing, False
@@ -1237,6 +1348,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             source_run_id=_safe_str(payload.get("receiver_run_id")),
             receiver_product_id=self._to_int(payload.get("receiver_product_id")),
             receiver_artifact_id=self._to_int(payload.get("receiver_artifact_id")),
+            store_id=store_id,
             receiver_sort_order=self._to_int(payload.get("receiver_sort_order")),
             source_event_uid=event_uid,
             content_fingerprint=snapshot_fingerprint,
@@ -1310,6 +1422,95 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             row.latest_content_fingerprint = snapshot_fingerprint
         row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
         row.updated_at = now
+
+    def _upsert_store(
+        self,
+        session: Session,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+        store_data: dict[str, object] | None = None,
+    ) -> _CatalogStore | None:
+        data = store_data if isinstance(store_data, dict) else self._extract_store_components(record, payload=payload)
+        if not isinstance(data, dict):
+            return None
+
+        store_key = _safe_str(data.get("store_key"))
+        if store_key is None:
+            return None
+
+        observed_at = self._to_utc(record.observed_at)
+        now = _utc_now()
+        row = self._get_cached_store_row(session, store_key=store_key)
+
+        if row is None:
+            row = _CatalogStore(
+                store_key=store_key,
+                parser_name=record.parser_name.strip().lower(),
+                source=_safe_str(data.get("source")),
+                retail_type=_safe_str(data.get("retail_type")),
+                code=_safe_str(data.get("code")),
+                address=_safe_str(data.get("address")),
+                schedule_weekdays_open_from=_safe_str(data.get("schedule_weekdays_open_from")),
+                schedule_weekdays_closed_from=_safe_str(data.get("schedule_weekdays_closed_from")),
+                schedule_saturday_open_from=_safe_str(data.get("schedule_saturday_open_from")),
+                schedule_saturday_closed_from=_safe_str(data.get("schedule_saturday_closed_from")),
+                schedule_sunday_open_from=_safe_str(data.get("schedule_sunday_open_from")),
+                schedule_sunday_closed_from=_safe_str(data.get("schedule_sunday_closed_from")),
+                temporarily_closed=self._to_bool(data.get("temporarily_closed")),
+                longitude=_as_float(data.get("longitude")),
+                latitude=_as_float(data.get("latitude")),
+                first_seen_at=observed_at,
+                last_seen_at=observed_at,
+                updated_at=now,
+            )
+            session.add(row)
+            self._cache_store_row(session, store_key=store_key, row=row)
+            return row
+
+        row.last_seen_at = self._max_datetime(row.last_seen_at, observed_at)
+        row.updated_at = now
+        self._fill_missing(row, "source", _safe_str(data.get("source")))
+        self._fill_missing(row, "retail_type", _safe_str(data.get("retail_type")))
+        self._fill_missing(row, "code", _safe_str(data.get("code")))
+        self._fill_missing(row, "address", _safe_str(data.get("address")))
+        self._fill_missing(
+            row,
+            "schedule_weekdays_open_from",
+            _safe_str(data.get("schedule_weekdays_open_from")),
+        )
+        self._fill_missing(
+            row,
+            "schedule_weekdays_closed_from",
+            _safe_str(data.get("schedule_weekdays_closed_from")),
+        )
+        self._fill_missing(
+            row,
+            "schedule_saturday_open_from",
+            _safe_str(data.get("schedule_saturday_open_from")),
+        )
+        self._fill_missing(
+            row,
+            "schedule_saturday_closed_from",
+            _safe_str(data.get("schedule_saturday_closed_from")),
+        )
+        self._fill_missing(
+            row,
+            "schedule_sunday_open_from",
+            _safe_str(data.get("schedule_sunday_open_from")),
+        )
+        self._fill_missing(
+            row,
+            "schedule_sunday_closed_from",
+            _safe_str(data.get("schedule_sunday_closed_from")),
+        )
+        if _is_missing(row.temporarily_closed):
+            row.temporarily_closed = self._to_bool(data.get("temporarily_closed"))
+        if _is_missing(row.longitude):
+            row.longitude = _as_float(data.get("longitude"))
+        if _is_missing(row.latitude):
+            row.latitude = _as_float(data.get("latitude"))
+        return row
 
     def _upsert_settlement(
         self,
@@ -1491,6 +1692,127 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return normalized
         return self._normalize_text(token)
 
+    def _extract_store_components(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        payload: dict[str, Any],
+    ) -> dict[str, object] | None:
+        artifact = payload.get("receiver_artifact")
+        artifact_data = artifact if isinstance(artifact, dict) else {}
+
+        source = _safe_str(payload.get("receiver_source")) or _safe_str(artifact_data.get("source"))
+        retail_type = _safe_str(artifact_data.get("retail_type"))
+        code = _safe_str(artifact_data.get("code"))
+        address = _safe_str(artifact_data.get("address"))
+
+        latitude = _as_float(artifact_data.get("latitude"))
+        longitude = _as_float(artifact_data.get("longitude"))
+        normalized_geo = self._normalize_geo_coordinates(latitude, longitude)
+        if normalized_geo is not None:
+            latitude, longitude = normalized_geo
+
+        fallback_artifact_id = self._to_int(payload.get("receiver_artifact_id"))
+        store_key = self._store_key(
+            record,
+            source=source,
+            retail_type=retail_type,
+            code=code,
+            address=address,
+            latitude=latitude,
+            longitude=longitude,
+            fallback_artifact_id=fallback_artifact_id,
+        )
+        if store_key is None:
+            return None
+
+        return {
+            "store_key": store_key,
+            "source": source,
+            "retail_type": retail_type,
+            "code": code,
+            "address": address,
+            "schedule_weekdays_open_from": _safe_str(artifact_data.get("schedule_weekdays_open_from")),
+            "schedule_weekdays_closed_from": _safe_str(artifact_data.get("schedule_weekdays_closed_from")),
+            "schedule_saturday_open_from": _safe_str(artifact_data.get("schedule_saturday_open_from")),
+            "schedule_saturday_closed_from": _safe_str(artifact_data.get("schedule_saturday_closed_from")),
+            "schedule_sunday_open_from": _safe_str(artifact_data.get("schedule_sunday_open_from")),
+            "schedule_sunday_closed_from": _safe_str(artifact_data.get("schedule_sunday_closed_from")),
+            "temporarily_closed": artifact_data.get("temporarily_closed"),
+            "longitude": longitude,
+            "latitude": latitude,
+        }
+
+    @staticmethod
+    def _build_store_key(
+        *,
+        parser_name: str,
+        source: str | None,
+        retail_type: str | None,
+        code: str | None,
+        address: str | None,
+        latitude: float | None,
+        longitude: float | None,
+        fallback_artifact_id: int | None,
+    ) -> str | None:
+        parser_token = parser_name.strip().lower()
+        source_token = (source or "").strip().lower()
+        retail_token = (retail_type or "").strip().lower()
+        code_token = (code or "").strip().lower()
+        address_token = (address or "").strip().lower()
+        coord_token = ""
+        normalized_geo = CatalogRepository._normalize_geo_coordinates(latitude, longitude)
+        if normalized_geo is not None:
+            lat, lon = normalized_geo
+            coord_token = f"{lat:.8f},{lon:.8f}"
+
+        identity_parts = [parser_token, source_token, retail_token]
+        if code_token:
+            identity_parts.extend(["code", code_token])
+        elif address_token:
+            identity_parts.extend(["address", address_token])
+            if coord_token:
+                identity_parts.extend(["coords", coord_token])
+        elif coord_token:
+            identity_parts.extend(["coords", coord_token])
+        elif fallback_artifact_id is not None:
+            identity_parts.extend(["artifact", str(fallback_artifact_id)])
+        else:
+            return None
+
+        seed = "|".join(identity_parts)
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:40]
+        return f"{parser_token}:store:{digest}"
+
+    def _store_key(
+        self,
+        record: NormalizedProductRecord,
+        *,
+        source: str | None = None,
+        retail_type: str | None = None,
+        code: str | None = None,
+        address: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        fallback_artifact_id: int | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str | None:
+        if payload is not None:
+            store_data = self._extract_store_components(record, payload=payload)
+            if not isinstance(store_data, dict):
+                return None
+            return _safe_str(store_data.get("store_key"))
+        return self._build_store_key(
+            parser_name=record.parser_name,
+            source=source,
+            retail_type=retail_type,
+            code=code,
+            address=address,
+            latitude=latitude,
+            longitude=longitude,
+            fallback_artifact_id=fallback_artifact_id,
+        )
+
     def _extract_geo_components(
         self,
         record: NormalizedProductRecord,
@@ -1635,6 +1957,15 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         return session.scalar(select(_CatalogSettlement).where(_CatalogSettlement.geo_key == geo_key))
 
     @staticmethod
+    def _get_store_row(session: Session, store_key: str) -> _CatalogStore | None:
+        for pending in session.new:
+            if not isinstance(pending, _CatalogStore):
+                continue
+            if pending.store_key == store_key:
+                return pending
+        return session.scalar(select(_CatalogStore).where(_CatalogStore.store_key == store_key))
+
+    @staticmethod
     def _get_category_row(session: Session, category_key: str) -> _CatalogCategory | None:
         for pending in session.new:
             if not isinstance(pending, _CatalogCategory):
@@ -1706,10 +2037,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 expiration_date_in_days=record.expiration_date_in_days,
                 rating=record.rating,
                 reviews_count=record.reviews_count,
-                price=record.price,
-                discount_price=record.discount_price,
-                loyal_price=record.loyal_price,
-                price_unit=record.price_unit,
                 adult=record.adult,
                 is_new=record.is_new,
                 promo=record.promo,
@@ -1717,7 +2044,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 hit=record.hit,
                 data_matrix=record.data_matrix,
                 unit=record.unit,
-                available_count=record.available_count,
                 package_quantity=record.package_quantity,
                 package_unit=record.package_unit,
                 primary_category_id=primary_category_id,
@@ -1774,14 +2100,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             existing.rating = record.rating
         if not _is_missing(record.reviews_count):
             existing.reviews_count = record.reviews_count
-        if not _is_missing(record.price):
-            existing.price = record.price
-        if not _is_missing(record.discount_price):
-            existing.discount_price = record.discount_price
-        if not _is_missing(record.loyal_price):
-            existing.loyal_price = record.loyal_price
-        if not _is_missing(record.price_unit):
-            existing.price_unit = record.price_unit
         if not _is_missing(record.adult):
             existing.adult = record.adult
         if not _is_missing(record.is_new):
@@ -1796,8 +2114,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             existing.data_matrix = record.data_matrix
         existing.unit = record.unit
 
-        if not _is_missing(record.available_count):
-            existing.available_count = record.available_count
         if not _is_missing(record.package_quantity):
             existing.package_quantity = record.package_quantity
         if not _is_missing(record.package_unit):
@@ -1959,6 +2275,28 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return int(token)
         except ValueError:
             return None
+
+    @staticmethod
+    def _to_bool(value: object) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+            return None
+        token = _safe_str(value)
+        if token is None:
+            return None
+        lowered = token.lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+        return None
 
     def _source_payload(self, record: NormalizedProductRecord) -> dict[str, Any]:
         raw_payload = record.source_payload if isinstance(record.source_payload, dict) else {}

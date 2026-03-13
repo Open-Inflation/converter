@@ -21,6 +21,7 @@ class _CatalogSchemaMigrationMixin:
         "source_run_id",
         "receiver_product_id",
         "receiver_artifact_id",
+        "store_id",
         "receiver_sort_order",
         "source_event_uid",
         "content_fingerprint",
@@ -50,10 +51,6 @@ class _CatalogSchemaMigrationMixin:
         required_product_columns = (
             "primary_category_id",
             "settlement_id",
-            "price",
-            "discount_price",
-            "loyal_price",
-            "price_unit",
             "composition_original",
         )
         missing_product_columns = [
@@ -65,9 +62,14 @@ class _CatalogSchemaMigrationMixin:
                 f"{', '.join(missing_product_columns)}. Use current SQL schema migration."
             )
 
-        forbidden_product_json_columns = [
+        forbidden_product_columns = [
             name
             for name in (
+                "price",
+                "discount_price",
+                "loyal_price",
+                "price_unit",
+                "available_count",
                 "image_urls_json",
                 "duplicate_image_urls_json",
                 "image_fingerprints_json",
@@ -75,16 +77,11 @@ class _CatalogSchemaMigrationMixin:
             )
             if name in product_columns
         ]
-        if forbidden_product_json_columns:
+        if forbidden_product_columns:
             raise RuntimeError(
-                "Schema mismatch in `catalog_products`: JSON columns are not allowed "
-                f"({', '.join(forbidden_product_json_columns)}). Use normalized schema."
+                "Schema mismatch in `catalog_products`: legacy columns are not allowed "
+                f"({', '.join(forbidden_product_columns)}). Use normalized schema."
             )
-        self._ensure_decimal_columns(
-            inspector=inspector,
-            table_name="catalog_products",
-            column_names=("price", "discount_price", "loyal_price"),
-        )
 
         if not inspector.has_table("catalog_product_snapshots"):
             raise RuntimeError(
@@ -112,6 +109,40 @@ class _CatalogSchemaMigrationMixin:
             table_name="catalog_product_snapshots",
             column_names=("price", "discount_price", "loyal_price"),
         )
+
+        if not inspector.has_table("catalog_stores"):
+            raise RuntimeError(
+                "Schema mismatch: missing table `catalog_stores`. "
+                "Run the current PostgreSQL schema migration."
+            )
+        store_columns = {item["name"] for item in inspector.get_columns("catalog_stores")}
+        required_store_columns = (
+            "id",
+            "store_key",
+            "parser_name",
+            "source",
+            "retail_type",
+            "code",
+            "address",
+            "schedule_weekdays_open_from",
+            "schedule_weekdays_closed_from",
+            "schedule_saturday_open_from",
+            "schedule_saturday_closed_from",
+            "schedule_sunday_open_from",
+            "schedule_sunday_closed_from",
+            "temporarily_closed",
+            "longitude",
+            "latitude",
+            "first_seen_at",
+            "last_seen_at",
+            "updated_at",
+        )
+        missing_store_columns = [name for name in required_store_columns if name not in store_columns]
+        if missing_store_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_stores`: missing columns "
+                f"{', '.join(missing_store_columns)}. Run SQL migration."
+            )
 
         for table_name in self._LEGACY_SNAPSHOT_TABLES:
             if inspector.has_table(table_name):

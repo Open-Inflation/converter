@@ -125,10 +125,6 @@ class _CatalogProduct(_CatalogBase):
     expiration_date_in_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    price: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
-    discount_price: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
-    loyal_price: Mapped[float | None] = mapped_column(Numeric(12, 4, asdecimal=False), nullable=True)
-    price_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
     adult: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_new: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     promo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -137,7 +133,6 @@ class _CatalogProduct(_CatalogBase):
     data_matrix: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
-    available_count: Mapped[float | None] = mapped_column(nullable=True)
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
@@ -173,6 +168,7 @@ class _CatalogProductSnapshot(_CatalogBase):
     source_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     receiver_product_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     receiver_artifact_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    store_id: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True, index=True)
     receiver_sort_order: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
 
     source_event_uid: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
@@ -234,6 +230,39 @@ class _CatalogSettlement(_CatalogBase):
             "ix_catalog_settlements_geo_point_gist",
             "geo_point",
             postgresql_using="gist",
+        ),
+    )
+
+
+class _CatalogStore(_CatalogBase):
+    __tablename__ = "catalog_stores"
+
+    id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
+    store_key: Mapped[str] = mapped_column(String(191), nullable=False, unique=True)
+    parser_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retail_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    code: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schedule_weekdays_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_weekdays_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_saturday_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_saturday_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_sunday_open_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    schedule_sunday_closed_from: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    temporarily_closed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_catalog_stores_parser_source_code",
+            "parser_name",
+            "source",
+            "code",
         ),
     )
 
@@ -320,6 +349,7 @@ __all__ = [
     "_CatalogProductSnapshot",
     "_CatalogProductSource",
     "_CatalogSettlement",
+    "_CatalogStore",
     "_CatalogStorageDeleteOutbox",
     "_as_float",
     "_is_missing",
