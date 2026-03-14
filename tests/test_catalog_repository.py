@@ -170,6 +170,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_stores)").fetchall()
                 }
+                category_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_categories)").fetchall()
+                }
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
@@ -232,6 +236,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("longitude", store_columns)
                 self.assertIn("latitude", store_columns)
                 self.assertIn("settlement_id", store_columns)
+                self.assertIn("adult", category_columns)
+                self.assertIn("icon", category_columns)
+                self.assertIn("banner", category_columns)
 
                 tables = {
                     str(row["name"])
@@ -1115,6 +1122,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                         {
                             "uid": "cat-root",
                             "title": "Посуда",
+                            "adult": True,
+                            "icon": "https://cdn.example/icons/cat-root.svg",
+                            "banner": "https://cdn.example/banners/cat-root.jpg",
                             "depth": 0,
                             "sort_order": 0,
                         },
@@ -1122,6 +1132,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                             "uid": "cat-plates",
                             "parent_uid": "cat-root",
                             "title": "Тарелки",
+                            "adult": False,
+                            "icon": "https://cdn.example/icons/cat-plates.svg",
+                            "banner": "https://cdn.example/banners/cat-plates.jpg",
                             "depth": 1,
                             "sort_order": 1,
                         },
@@ -1153,11 +1166,17 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(int(store["settlement_id"]), int(settlement["id"]))
 
                 category_rows = conn.execute(
-                    "SELECT source_uid, title, depth FROM catalog_categories ORDER BY depth ASC"
+                    "SELECT source_uid, title, adult, icon, banner, depth FROM catalog_categories ORDER BY depth ASC"
                 ).fetchall()
                 self.assertEqual(len(category_rows), 2)
                 self.assertEqual(category_rows[0]["source_uid"], "cat-root")
                 self.assertEqual(category_rows[1]["source_uid"], "cat-plates")
+                self.assertEqual(int(category_rows[0]["adult"]), 1)
+                self.assertEqual(int(category_rows[1]["adult"]), 0)
+                self.assertEqual(category_rows[0]["icon"], "https://cdn.example/icons/cat-root.svg")
+                self.assertEqual(category_rows[1]["icon"], "https://cdn.example/icons/cat-plates.svg")
+                self.assertEqual(category_rows[0]["banner"], "https://cdn.example/banners/cat-root.jpg")
+                self.assertEqual(category_rows[1]["banner"], "https://cdn.example/banners/cat-plates.jpg")
 
                 legacy_table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='catalog_product_category_links'"

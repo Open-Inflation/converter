@@ -145,6 +145,37 @@ class _CatalogSchemaMigrationMixin:
                 f"{', '.join(missing_store_columns)}. Run SQL migration."
             )
 
+        if not inspector.has_table("catalog_categories"):
+            raise RuntimeError(
+                "Schema mismatch: missing table `catalog_categories`. "
+                "Run the current PostgreSQL schema migration."
+            )
+        category_columns = {item["name"] for item in inspector.get_columns("catalog_categories")}
+        required_category_columns = (
+            "id",
+            "category_key",
+            "parser_name",
+            "source_uid",
+            "parent_source_uid",
+            "title",
+            "title_normalized",
+            "alias",
+            "adult",
+            "icon",
+            "banner",
+            "depth",
+            "sort_order",
+            "first_seen_at",
+            "last_seen_at",
+            "updated_at",
+        )
+        missing_category_columns = [name for name in required_category_columns if name not in category_columns]
+        if missing_category_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_categories`: missing columns "
+                f"{', '.join(missing_category_columns)}. Run SQL migration."
+            )
+
         for table_name in self._LEGACY_SNAPSHOT_TABLES:
             if inspector.has_table(table_name):
                 raise RuntimeError(

@@ -50,7 +50,7 @@ converter/
   плюс event-контракт (`source_event_uid`, `content_fingerprint`, `valid_from_at/valid_to_at`, `observed_at`, `created_at`).
 - `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
-- `catalog_categories` - справочник категорий (uid/title/depth/parent).
+- `catalog_categories` - справочник категорий (uid/title/depth/parent + adult/icon/banner).
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
 - `catalog_product_assets` - массивные поля текущей проекции товара (image urls, duplicates, fingerprints) в нормализованном виде.
 

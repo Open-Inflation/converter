@@ -194,6 +194,9 @@ Constraints/indexes:
 | `title` | `TEXT` | yes | Заголовок категории |
 | `title_normalized` | `TEXT` | yes | Нормализованный заголовок |
 | `alias` | `TEXT` | yes | Алиас |
+| `adult` | `BOOLEAN` | yes | 18+ категория |
+| `icon` | `TEXT` | yes | Иконка |
+| `banner` | `TEXT` | yes | Баннер |
 | `depth` | `INTEGER` | yes | Глубина |
 | `sort_order` | `INTEGER` | yes | Порядок |
 | `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |

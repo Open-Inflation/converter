@@ -1662,6 +1662,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                     title=title,
                     title_normalized=title_normalized,
                     alias=_safe_str(item.get("alias")),
+                    adult=self._to_bool(item.get("adult")),
+                    icon=_safe_str(item.get("icon")),
+                    banner=_safe_str(item.get("banner")),
                     depth=self._to_int(item.get("depth")),
                     sort_order=self._to_int(item.get("sort_order")),
                     first_seen_at=observed_at,
@@ -1679,6 +1682,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 self._fill_missing(row, "title", title)
                 self._fill_missing(row, "title_normalized", title_normalized)
                 self._fill_missing(row, "alias", _safe_str(item.get("alias")))
+                self._fill_missing(row, "adult", self._to_bool(item.get("adult")))
+                self._fill_missing(row, "icon", _safe_str(item.get("icon")))
+                self._fill_missing(row, "banner", _safe_str(item.get("banner")))
                 self._fill_missing(row, "depth", self._to_int(item.get("depth")))
                 self._fill_missing(row, "sort_order", self._to_int(item.get("sort_order")))
 
