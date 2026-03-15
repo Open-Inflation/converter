@@ -7,6 +7,8 @@ from converter.parsers.normalizers import RussianTextNormalizer
 
 from .patterns import ASSORT_RE, BY_VOLUME_RE, BY_WEIGHT_RE, DIM_CM_RE, DIM_GENERIC_RE, WVL_RE
 
+_PACKAGE_COUNT_RE = re.compile(r"(?P<count>\d{1,3})\s*шт\b", re.IGNORECASE)
+
 
 def _to_float(value: str) -> float:
     return float(value.replace(",", ".").strip())
@@ -37,23 +39,11 @@ def _extract_package(title: str) -> tuple[float | None, PackageUnit | None]:
     return None, None
 
 
-def _extract_count_heuristic(title: str) -> int | None:
-    scrubbed = DIM_CM_RE.sub(" ", title)
-    scrubbed = WVL_RE.sub(" ", scrubbed)
-    scrubbed = ASSORT_RE.sub(" ", scrubbed)
-
-    numbers = [int(token) for token in re.findall(r"\b\d+\b", scrubbed)]
-    if not numbers:
+def _extract_package_count(title: str) -> float | None:
+    matches = list(_PACKAGE_COUNT_RE.finditer(title))
+    if not matches:
         return None
-
-    plausible = [num for num in numbers if 2 <= num <= 200]
-    if plausible:
-        return plausible[-1]
-
-    if len(numbers) == 1 and 1 <= numbers[0] <= 200:
-        return numbers[0]
-
-    return None
+    return float(int(matches[-1].group("count")))
 
 
 def _guess_brand(parts: list[str], normalizer: RussianTextNormalizer) -> str | None:
@@ -89,7 +79,7 @@ class FixPriceTitleParser:
         title_without_assort = ASSORT_RE.sub("", raw).strip(" ,")
 
         package_quantity, package_unit = _extract_package(title_without_assort)
-        count = _extract_count_heuristic(title_without_assort)
+        package_count = _extract_package_count(title_without_assort)
 
         if BY_WEIGHT_RE.search(title_without_assort):
             unit: Unit = "KGM"
@@ -101,7 +91,8 @@ class FixPriceTitleParser:
             package_quantity, package_unit = None, None
         else:
             unit = "PCE"
-            available_count = float(count) if count is not None else None
+            # Store stock must come from API payload, not from title tokens like `15 шт`.
+            available_count = None
 
         # Keep brand separate from semantic product name.
         name_normalized = self._normalizer.lemmatize(name_original)
@@ -120,4 +111,5 @@ class FixPriceTitleParser:
             available_count=available_count,
             package_quantity=package_quantity,
             package_unit=package_unit,
+            package_count=package_count,
         )

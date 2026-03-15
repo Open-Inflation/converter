@@ -248,6 +248,11 @@ def map_receiver_row_to_raw_product(
         "receiver_geo_alias": _safe_str(row.get("geo_alias")),
         "receiver_geo_longitude": _as_float(row.get("geo_longitude")),
         "receiver_geo_latitude": _as_float(row.get("geo_latitude")),
+        "receiver_unit_net": _safe_str(row.get("product_unit_net")) or _safe_str(row.get("product_unit")),
+        "receiver_package_quantity_net": _as_float(row.get("product_package_quantity_net")),
+        "receiver_package_weight_gross": _as_float(row.get("product_package_weight_gross")),
+        "receiver_package_count": _as_float(row.get("product_package_count")),
+        "receiver_package_unit": _safe_str(row.get("product_package_unit")),
         "receiver_product": receiver_product,
         "receiver_artifact": receiver_artifact,
         "receiver_admin_unit": receiver_admin,
@@ -257,6 +262,22 @@ def map_receiver_row_to_raw_product(
         "receiver_product_categories": receiver_product_categories,
     }
 
+    unit = _normalize_unit(row.get("product_unit_net"))
+    if unit is None:
+        unit = _normalize_unit(row.get("product_unit"))
+
+    package_quantity_net = _as_float(row.get("product_package_quantity_net"))
+    package_weight_gross = _as_float(row.get("product_package_weight_gross"))
+    package_count = _as_float(row.get("product_package_count"))
+    package_quantity = package_quantity_net
+    if package_quantity is None:
+        package_quantity = _as_float(row.get("product_package_quantity"))
+
+    package_unit = _normalize_package_unit(row.get("product_package_unit"))
+    if package_quantity is None and package_weight_gross is not None:
+        package_quantity = package_weight_gross
+        package_unit = "KGM"
+
     return RawProductRecord(
         parser_name=parser_name,
         title=title,
@@ -264,10 +285,15 @@ def map_receiver_row_to_raw_product(
         plu=_safe_str(row.get("product_plu")),
         sku=_safe_str(row.get("product_sku")),
         brand=_safe_str(row.get("product_brand")),
-        unit=_normalize_unit(row.get("product_unit")),
+        unit=unit,
         available_count=_as_float(row.get("product_available_count")),
-        package_quantity=_as_float(row.get("product_package_quantity")),
-        package_unit=_normalize_package_unit(row.get("product_package_unit")),
+        package_quantity=package_quantity,
+        package_unit=package_unit,
+        package_weight_gross=package_weight_gross,
+        package_count=package_count,
+        dimension_height_m=_as_float(row.get("product_dimension_height_m")),
+        dimension_width_m=_as_float(row.get("product_dimension_width_m")),
+        dimension_depth_m=_as_float(row.get("product_dimension_depth_m")),
         price=_as_float(row.get("product_price")),
         discount_price=_as_float(row.get("product_discount_price")),
         loyal_price=_as_float(row.get("product_loyal_price")),

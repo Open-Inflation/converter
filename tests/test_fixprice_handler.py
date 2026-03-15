@@ -26,9 +26,28 @@ class FixPriceHandlerTests(unittest.TestCase):
         result = self.handler.normalize_title("Шоколад молочный, 200 г, 15 шт, в ассортименте")
 
         self.assertEqual(result.unit, "PCE")
-        self.assertEqual(result.available_count, 15.0)
+        self.assertIsNone(result.available_count)
+        self.assertEqual(result.package_count, 15.0)
         self.assertEqual(result.package_unit, "KGM")
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.2)
+
+    def test_title_parser_extracts_package_count_from_compact_pattern(self) -> None:
+        result = self.handler.normalize_title("Салфетки бумажные, 20шт, в ассортименте")
+
+        self.assertEqual(result.unit, "PCE")
+        self.assertEqual(result.package_count, 20.0)
+        self.assertIsNone(result.available_count)
+
+    def test_handle_keeps_stock_available_count_separate_from_package_count(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Шоколад молочный, 200 г, 15 шт, в ассортименте",
+            available_count=52.0,
+        )
+        normalized = self.handler.handle(raw)
+
+        self.assertEqual(normalized.available_count, 52.0)
+        self.assertEqual(normalized.package_count, 15.0)
 
     def test_title_parser_handles_mixed_latin_cyrillic_prefix_without_split(self) -> None:
         result = self.handler.normalize_title("Cалфетки Kitchen Collection 30x30см")
@@ -65,6 +84,65 @@ class FixPriceHandlerTests(unittest.TestCase):
 
         normalized = self.handler.handle(raw)
         self.assertIsNone(normalized.brand)
+
+    def test_handle_extracts_dimensions_from_meta_sequence_with_order_hint(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Органайзер",
+            payload={
+                "receiver_product_meta": [
+                    {"name": "Габариты (ШхВхГ), см", "value_text": "20x30x40"},
+                ]
+            },
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertAlmostEqual(normalized.dimension_height_m or 0.0, 0.3)
+        self.assertAlmostEqual(normalized.dimension_width_m or 0.0, 0.2)
+        self.assertAlmostEqual(normalized.dimension_depth_m or 0.0, 0.4)
+
+    def test_handle_extracts_dimensions_from_title_without_unit_as_centimeters(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Пакет подарочный 12х14",
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertAlmostEqual(normalized.dimension_height_m or 0.0, 0.12)
+        self.assertAlmostEqual(normalized.dimension_width_m or 0.0, 0.14)
+        self.assertIsNone(normalized.dimension_depth_m)
+
+    def test_handle_extracts_dimensions_from_labeled_meta_rows(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Коробка",
+            payload={
+                "receiver_product_meta": [
+                    {"name": "Высота", "value_text": "1,2 м"},
+                    {"name": "Ширина", "value_text": "30 см"},
+                    {"name": "Глубина", "value_text": "450 мм"},
+                ]
+            },
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertAlmostEqual(normalized.dimension_height_m or 0.0, 1.2)
+        self.assertAlmostEqual(normalized.dimension_width_m or 0.0, 0.3)
+        self.assertAlmostEqual(normalized.dimension_depth_m or 0.0, 0.45)
+
+    def test_handle_keeps_explicit_raw_dimensions(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Пакет подарочный 12х14",
+            dimension_height_m=2.0,
+            dimension_width_m=3.0,
+            dimension_depth_m=4.0,
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertEqual(normalized.dimension_height_m, 2.0)
+        self.assertEqual(normalized.dimension_width_m, 3.0)
+        self.assertEqual(normalized.dimension_depth_m, 4.0)
 
     def test_normalized_title_no_stopwords_does_not_include_brand_tokens(self) -> None:
         result = self.handler.normalize_title("Форма для кулича, O'Kitchen, в ассортименте")

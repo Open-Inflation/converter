@@ -120,6 +120,17 @@ class ReceiverRepository:
 
             out: list[RawProductRecord] = []
             for product, artifact, admin in rows:
+                package_quantity_net = _as_float(product.package_quantity_net)
+                package_weight_gross = _as_float(product.package_weight_gross)
+                package_unit = _safe_str(product.package_unit)
+                # Converter core currently uses a single package_quantity field.
+                # Prefer net quantity, fallback to gross weight (always KGM) when net is absent.
+                effective_package_quantity = package_quantity_net
+                effective_package_unit = package_unit
+                if effective_package_quantity is None and package_weight_gross is not None:
+                    effective_package_quantity = package_weight_gross
+                    effective_package_unit = "KGM"
+
                 row_data: dict[str, Any] = {
                     "product_id": product.id,
                     "artifact_id": product.artifact_id,
@@ -145,10 +156,13 @@ class ReceiverRepository:
                     "product_discount_price": product.discount_price,
                     "product_loyal_price": product.loyal_price,
                     "product_price_unit": product.price_unit,
-                    "product_unit": product.unit,
+                    "product_unit": product.unit_net,
                     "product_available_count": product.available_count,
-                    "product_package_quantity": product.package_quantity,
-                    "product_package_unit": product.package_unit,
+                    "product_package_quantity": effective_package_quantity,
+                    "product_package_unit": effective_package_unit,
+                    "product_package_quantity_net": package_quantity_net,
+                    "product_package_weight_gross": package_weight_gross,
+                    "product_package_count": _as_float(product.package_count),
                     "category_uids_json": product.categories_uid_json,
                     "product_main_image": product.main_image,
                     "product_sort_order": product.sort_order,
@@ -218,10 +232,12 @@ class ReceiverRepository:
                     "discount_price": product.discount_price,
                     "loyal_price": product.loyal_price,
                     "price_unit": product.price_unit,
-                    "unit": product.unit,
+                    "unit_net": product.unit_net,
                     "available_count": product.available_count,
-                    "package_quantity": product.package_quantity,
-                    "package_unit": product.package_unit,
+                    "package_quantity_net": package_quantity_net,
+                    "package_weight_gross": package_weight_gross,
+                    "package_unit": package_unit,
+                    "package_count": _as_float(product.package_count),
                     "categories_uid_json": _as_string_list(product.categories_uid_json),
                     "main_image": product.main_image,
                     "sort_order": product.sort_order,
@@ -491,6 +507,10 @@ class ReceiverRepository:
             "discount_price",
             "loyal_price",
             "price_unit",
+            "unit_net",
+            "package_quantity_net",
+            "package_weight_gross",
+            "package_count",
         }
         missing_product = sorted(required_product - product_columns)
         if missing_product:

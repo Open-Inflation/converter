@@ -78,6 +78,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         "composition_normalized",
         "package_quantity",
         "package_unit",
+        "dimension_height_m",
+        "dimension_width_m",
+        "dimension_depth_m",
     )
     _RETRYABLE_POSTGRESQL_SQLSTATES = {"40P01", "40001"}
     _TXN_RETRY_ATTEMPTS = 5
@@ -2064,6 +2067,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 unit=record.unit,
                 package_quantity=record.package_quantity,
                 package_unit=record.package_unit,
+                dimension_height_m=record.dimension_height_m,
+                dimension_width_m=record.dimension_width_m,
+                dimension_depth_m=record.dimension_depth_m,
                 primary_category_id=primary_category_id,
                 settlement_id=settlement_id,
                 composition_original=record.composition_original,
@@ -2136,6 +2142,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             existing.package_quantity = record.package_quantity
         if not _is_missing(record.package_unit):
             existing.package_unit = record.package_unit
+        if not _is_missing(record.dimension_height_m):
+            existing.dimension_height_m = record.dimension_height_m
+        if not _is_missing(record.dimension_width_m):
+            existing.dimension_width_m = record.dimension_width_m
+        if not _is_missing(record.dimension_depth_m):
+            existing.dimension_depth_m = record.dimension_depth_m
 
         if primary_category_id is not None:
             existing.primary_category_id = primary_category_id

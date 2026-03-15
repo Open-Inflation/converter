@@ -26,6 +26,11 @@ class RawProductRecord:
     available_count: float | None = None
     package_quantity: float | None = None
     package_unit: PackageUnit | None = None
+    package_weight_gross: float | None = None
+    package_count: float | None = None
+    dimension_height_m: float | None = None
+    dimension_width_m: float | None = None
+    dimension_depth_m: float | None = None
     price: float | None = None
     discount_price: float | None = None
     loyal_price: float | None = None
@@ -70,6 +75,7 @@ class TitleNormalizationResult:
     available_count: float | None
     package_quantity: float | None
     package_unit: PackageUnit | None
+    package_count: float | None = None
 
 
 @dataclass(slots=True)
@@ -86,6 +92,11 @@ class NormalizedProductRecord:
     available_count: float | None
     package_quantity: float | None
     package_unit: PackageUnit | None
+    package_weight_gross: float | None = None
+    package_count: float | None = None
+    dimension_height_m: float | None = None
+    dimension_width_m: float | None = None
+    dimension_depth_m: float | None = None
     price: float | None = None
     discount_price: float | None = None
     loyal_price: float | None = None

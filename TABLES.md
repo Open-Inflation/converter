@@ -55,6 +55,9 @@
 | `unit` | `VARCHAR(32)` | no | Единица измерения |
 | `package_quantity` | `FLOAT` | yes | Кол-во в упаковке |
 | `package_unit` | `VARCHAR(32)` | yes | Единица упаковки |
+| `dimension_height_m` | `FLOAT` | yes | Высота в метрах |
+| `dimension_width_m` | `FLOAT` | yes | Ширина в метрах |
+| `dimension_depth_m` | `FLOAT` | yes | Глубина в метрах |
 | `primary_category_id` | `BIGINT` | yes | Основная категория (только current-state) |
 | `settlement_id` | `BIGINT` | yes | Привязка к settlement |
 | `composition_original` | `TEXT` | yes | Состав (оригинал) |

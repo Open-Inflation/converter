@@ -101,6 +101,11 @@ class NullBackfillService:
         "composition_normalized",
         "package_quantity",
         "package_unit",
+        "package_weight_gross",
+        "package_count",
+        "dimension_height_m",
+        "dimension_width_m",
+        "dimension_depth_m",
     )
 
     def __init__(self, fields: tuple[str, ...] | None = None) -> None:

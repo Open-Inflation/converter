@@ -85,6 +85,7 @@ SQLite оставлен только для локальных тестов/фи
 - `title_original_no_stopwords`
 - `title_normalized_no_stopwords`
 - `unit`, `available_count`, `package_quantity`, `package_unit`
+- `dimension_height_m`, `dimension_width_m`, `dimension_depth_m` (в метрах)
 
 Unit guide:
 

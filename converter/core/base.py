@@ -19,12 +19,17 @@ class BaseParserHandler(ABC):
 
         package_quantity = raw.package_quantity
         package_unit = raw.package_unit
+        package_weight_gross = raw.package_weight_gross
+        package_count = raw.package_count if raw.package_count is not None else title.package_count
         if package_quantity is None and package_unit is None:
             package_quantity = title.package_quantity
             package_unit = title.package_unit
         elif (package_quantity is None) != (package_unit is None):
             package_quantity = title.package_quantity
             package_unit = title.package_unit
+        if package_quantity is None and package_weight_gross is not None:
+            package_quantity = package_weight_gross
+            package_unit = "KGM"
 
         return NormalizedProductRecord(
             parser_name=self.parser_name,
@@ -37,6 +42,11 @@ class BaseParserHandler(ABC):
             available_count=available_count,
             package_quantity=package_quantity,
             package_unit=package_unit,
+            package_weight_gross=package_weight_gross,
+            package_count=package_count,
+            dimension_height_m=raw.dimension_height_m,
+            dimension_width_m=raw.dimension_width_m,
+            dimension_depth_m=raw.dimension_depth_m,
             price=raw.price,
             discount_price=raw.discount_price,
             loyal_price=raw.loyal_price,

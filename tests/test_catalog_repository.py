@@ -178,6 +178,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
                 self.assertIn("composition_original", product_columns)
+                self.assertIn("dimension_height_m", product_columns)
+                self.assertIn("dimension_width_m", product_columns)
+                self.assertIn("dimension_depth_m", product_columns)
                 self.assertNotIn("title_normalized", product_columns)
                 self.assertNotIn("title_original_no_stopwords", product_columns)
                 self.assertNotIn("price", product_columns)
@@ -211,6 +214,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("composition_original", snapshot_columns)
                 self.assertNotIn("package_quantity", snapshot_columns)
                 self.assertNotIn("package_unit", snapshot_columns)
+                self.assertNotIn("dimension_height_m", snapshot_columns)
+                self.assertNotIn("dimension_width_m", snapshot_columns)
+                self.assertNotIn("dimension_depth_m", snapshot_columns)
                 self.assertNotIn("title_normalized", snapshot_columns)
                 self.assertNotIn("title_original_no_stopwords", snapshot_columns)
                 self.assertNotIn("source_payload_json", snapshot_columns)
@@ -415,6 +421,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 available_count=1.0,
                 package_quantity=None,
                 package_unit=None,
+                dimension_height_m=0.21,
+                dimension_width_m=0.31,
+                dimension_depth_m=0.41,
                 price=199.9,
                 discount_price=149.9,
                 loyal_price=129.9,
@@ -432,7 +441,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 product = conn.execute(
                     """
-                    SELECT id, description
+                    SELECT id, description, dimension_height_m, dimension_width_m, dimension_depth_m
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -441,6 +450,9 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(product)
                 assert product is not None
                 self.assertEqual(product["description"], "Тестовое описание")
+                self.assertAlmostEqual(float(product["dimension_height_m"]), 0.21, places=6)
+                self.assertAlmostEqual(float(product["dimension_width_m"]), 0.31, places=6)
+                self.assertAlmostEqual(float(product["dimension_depth_m"]), 0.41, places=6)
                 self.assertEqual(
                     self._asset_values(
                         conn,

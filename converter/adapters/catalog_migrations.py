@@ -52,6 +52,9 @@ class _CatalogSchemaMigrationMixin:
             "primary_category_id",
             "settlement_id",
             "composition_original",
+            "dimension_height_m",
+            "dimension_width_m",
+            "dimension_depth_m",
         )
         missing_product_columns = [
             name for name in required_product_columns if name not in product_columns

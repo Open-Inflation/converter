@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from converter import ReceiverSQLiteRepository, build_default_pipeline
+from converter.adapters.receiver_mapping import map_receiver_row_to_raw_product
 
 
 def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bool) -> None:
@@ -67,10 +68,12 @@ def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bo
             discount_price REAL,
             loyal_price REAL,
             price_unit TEXT,
-            unit TEXT,
+            unit_net TEXT,
             available_count REAL,
-            package_quantity REAL,
+            package_quantity_net REAL,
+            package_weight_gross REAL,
             package_unit TEXT,
+            package_count REAL,
             categories_uid_json TEXT,
             main_image TEXT,
             sort_order INTEGER
@@ -214,7 +217,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                     """
                     INSERT INTO run_artifact_products(
                         id, artifact_id, sku, plu, title, composition, brand,
-                        unit, available_count, package_quantity, package_unit,
+                        unit_net, available_count, package_quantity_net, package_unit,
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -314,7 +317,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                         composition, brand, producer_name, producer_country,
                         expiration_date_in_days, rating, reviews_count,
                         price, discount_price, loyal_price, price_unit,
-                        unit, available_count, package_quantity, package_unit,
+                        unit_net, available_count, package_quantity_net, package_unit,
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -453,6 +456,22 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_mapping_uses_gross_weight_when_net_quantity_missing(self) -> None:
+        raw = map_receiver_row_to_raw_product(
+            {
+                "parser_name": "fixprice",
+                "product_title": "Товар",
+                "product_unit_net": "KGM",
+                "product_package_quantity_net": None,
+                "product_package_weight_gross": 0.159,
+                "product_package_unit": "KGM",
+            }
+        )
+        self.assertEqual(raw.unit, "KGM")
+        self.assertAlmostEqual(raw.package_quantity or 0.0, 0.159)
+        self.assertEqual(raw.package_unit, "KGM")
+        self.assertAlmostEqual(raw.package_weight_gross or 0.0, 0.159)
+
     def test_delete_processed_products_cleans_orphans_and_keeps_scheduler_tables(self) -> None:
         db_path = self._make_db(include_artifact_parser_name=True)
         try:
@@ -477,7 +496,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                     """
                     INSERT INTO run_artifact_products(
                         id, artifact_id, sku, plu, title, composition, brand,
-                        unit, available_count, package_quantity, package_unit,
+                        unit_net, available_count, package_quantity_net, package_unit,
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -487,7 +506,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                     """
                     INSERT INTO run_artifact_products(
                         id, artifact_id, sku, plu, title, composition, brand,
-                        unit, available_count, package_quantity, package_unit,
+                        unit_net, available_count, package_quantity_net, package_unit,
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
@@ -497,7 +516,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                     """
                     INSERT INTO run_artifact_products(
                         id, artifact_id, sku, plu, title, composition, brand,
-                        unit, available_count, package_quantity, package_unit,
+                        unit_net, available_count, package_quantity_net, package_unit,
                         categories_uid_json, main_image, sort_order
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
