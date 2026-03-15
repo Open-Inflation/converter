@@ -274,9 +274,6 @@ def map_receiver_row_to_raw_product(
         package_quantity = _as_float(row.get("product_package_quantity"))
 
     package_unit = _normalize_package_unit(row.get("product_package_unit"))
-    if package_quantity is None and package_weight_gross is not None:
-        package_quantity = package_weight_gross
-        package_unit = "KGM"
 
     return RawProductRecord(
         parser_name=parser_name,

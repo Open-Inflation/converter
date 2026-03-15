@@ -39,9 +39,9 @@ def _extract_multipack(title: str) -> tuple[float | None, float | None, PackageU
         return None, None, None
 
     match = matches[-1]
-    available_count = float(int(match.group("count")))
+    package_count = float(int(match.group("count")))
     package_quantity, package_unit = _to_package_quantity(match.group("q"), match.group("u"))
-    return available_count, package_quantity, package_unit
+    return package_count, package_quantity, package_unit
 
 
 def _extract_package(title: str) -> tuple[float | None, PackageUnit | None]:
@@ -135,19 +135,17 @@ class ChizhikTitleParser:
         brand = _extract_brand(name_original_with_brand)
         name_original = _remove_brand_from_name(name_original_with_brand, brand)
 
-        available_count, package_quantity, package_unit = _extract_multipack(raw)
-        if available_count is None:
-            available_count = _extract_piece_count(raw)
+        package_count, package_quantity, package_unit = _extract_multipack(raw)
+        if package_count is None:
+            package_count = _extract_piece_count(raw)
         if package_quantity is None and package_unit is None:
             package_quantity, package_unit = _extract_package(raw)
 
         if BY_WEIGHT_RE.search(raw):
             unit: Unit = "KGM"
-            available_count = None
             package_quantity, package_unit = None, None
         elif BY_VOLUME_RE.search(raw):
             unit = "LTR"
-            available_count = None
             package_quantity, package_unit = None, None
         else:
             unit = "PCE"
@@ -165,7 +163,8 @@ class ChizhikTitleParser:
             original_name_no_stopwords=original_without_stopwords,
             normalized_name_no_stopwords=normalized_without_stopwords,
             unit=unit,
-            available_count=available_count,
+            available_count=None,
             package_quantity=package_quantity,
             package_unit=package_unit,
+            package_count=package_count,
         )

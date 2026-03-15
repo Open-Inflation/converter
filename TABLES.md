@@ -55,6 +55,8 @@
 | `unit` | `VARCHAR(32)` | no | Единица измерения |
 | `package_quantity` | `FLOAT` | yes | Кол-во в упаковке |
 | `package_unit` | `VARCHAR(32)` | yes | Единица упаковки |
+| `package_weight_gross` | `FLOAT` | yes | Вес брутто упаковки (кг) |
+| `package_count` | `FLOAT` | yes | Кол-во штук в упаковке |
 | `dimension_height_m` | `FLOAT` | yes | Высота в метрах |
 | `dimension_width_m` | `FLOAT` | yes | Ширина в метрах |
 | `dimension_depth_m` | `FLOAT` | yes | Глубина в метрах |

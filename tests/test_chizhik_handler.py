@@ -25,7 +25,8 @@ class ChizhikHandlerTests(unittest.TestCase):
 
         self.assertEqual(result.unit, "PCE")
         self.assertEqual(result.brand, "Greenfield Summer Bouquet")
-        self.assertEqual(result.available_count, 25.0)
+        self.assertIsNone(result.available_count)
+        self.assertEqual(result.package_count, 25.0)
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.002)
         self.assertEqual(result.package_unit, "KGM")
 
@@ -34,7 +35,8 @@ class ChizhikHandlerTests(unittest.TestCase):
 
         self.assertEqual(result.unit, "PCE")
         self.assertEqual(result.brand, "Contex Classic")
-        self.assertEqual(result.available_count, 3.0)
+        self.assertIsNone(result.available_count)
+        self.assertEqual(result.package_count, 3.0)
         self.assertIsNone(result.package_quantity)
         self.assertIsNone(result.package_unit)
 
@@ -110,7 +112,8 @@ class ChizhikPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(normalized.parser_name, "chizhik")
         self.assertEqual(normalized.plu, "2070249")
         self.assertEqual(normalized.unit, "PCE")
-        self.assertEqual(normalized.available_count, 25.0)
+        self.assertIsNone(normalized.available_count)
+        self.assertEqual(normalized.package_count, 25.0)
         self.assertAlmostEqual(normalized.package_quantity or 0.0, 0.002)
         self.assertEqual(normalized.package_unit, "KGM")
         self.assertTrue(normalized.canonical_product_id)

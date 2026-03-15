@@ -456,7 +456,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
-    def test_mapping_uses_gross_weight_when_net_quantity_missing(self) -> None:
+    def test_mapping_does_not_mix_gross_weight_into_package_quantity(self) -> None:
         raw = map_receiver_row_to_raw_product(
             {
                 "parser_name": "fixprice",
@@ -468,7 +468,7 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
             }
         )
         self.assertEqual(raw.unit, "KGM")
-        self.assertAlmostEqual(raw.package_quantity or 0.0, 0.159)
+        self.assertIsNone(raw.package_quantity)
         self.assertEqual(raw.package_unit, "KGM")
         self.assertAlmostEqual(raw.package_weight_gross or 0.0, 0.159)
 

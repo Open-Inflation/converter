@@ -27,7 +27,8 @@ class PerekrestokHandlerTests(unittest.TestCase):
         )
 
         self.assertEqual(result.unit, "PCE")
-        self.assertEqual(result.available_count, 2.0)
+        self.assertIsNone(result.available_count)
+        self.assertEqual(result.package_count, 2.0)
         self.assertAlmostEqual(result.package_quantity or 0.0, 0.064)
         self.assertEqual(result.package_unit, "KGM")
 
@@ -36,7 +37,8 @@ class PerekrestokHandlerTests(unittest.TestCase):
         result = self.handler.normalize_title("Чеснок, 3шт")
 
         self.assertEqual(result.unit, "PCE")
-        self.assertEqual(result.available_count, 3.0)
+        self.assertIsNone(result.available_count)
+        self.assertEqual(result.package_count, 3.0)
         self.assertIsNone(result.package_quantity)
         self.assertIsNone(result.package_unit)
 

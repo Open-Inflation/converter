@@ -78,6 +78,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         "composition_normalized",
         "package_quantity",
         "package_unit",
+        "package_weight_gross",
+        "package_count",
         "dimension_height_m",
         "dimension_width_m",
         "dimension_depth_m",
@@ -2067,6 +2069,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 unit=record.unit,
                 package_quantity=record.package_quantity,
                 package_unit=record.package_unit,
+                package_weight_gross=record.package_weight_gross,
+                package_count=record.package_count,
                 dimension_height_m=record.dimension_height_m,
                 dimension_width_m=record.dimension_width_m,
                 dimension_depth_m=record.dimension_depth_m,
@@ -2142,6 +2146,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             existing.package_quantity = record.package_quantity
         if not _is_missing(record.package_unit):
             existing.package_unit = record.package_unit
+        if not _is_missing(record.package_weight_gross):
+            existing.package_weight_gross = record.package_weight_gross
+        if not _is_missing(record.package_count):
+            existing.package_count = record.package_count
         if not _is_missing(record.dimension_height_m):
             existing.dimension_height_m = record.dimension_height_m
         if not _is_missing(record.dimension_width_m):

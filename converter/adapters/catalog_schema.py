@@ -136,6 +136,8 @@ class _CatalogProduct(_CatalogBase):
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
     package_quantity: Mapped[float | None] = mapped_column(nullable=True)
     package_unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    package_weight_gross: Mapped[float | None] = mapped_column(Float, nullable=True)
+    package_count: Mapped[float | None] = mapped_column(Float, nullable=True)
     dimension_height_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     dimension_width_m: Mapped[float | None] = mapped_column(Float, nullable=True)
     dimension_depth_m: Mapped[float | None] = mapped_column(Float, nullable=True)

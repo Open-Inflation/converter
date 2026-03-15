@@ -27,9 +27,6 @@ class BaseParserHandler(ABC):
         elif (package_quantity is None) != (package_unit is None):
             package_quantity = title.package_quantity
             package_unit = title.package_unit
-        if package_quantity is None and package_weight_gross is not None:
-            package_quantity = package_weight_gross
-            package_unit = "KGM"
 
         return NormalizedProductRecord(
             parser_name=self.parser_name,
