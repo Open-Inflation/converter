@@ -80,6 +80,19 @@ class StorageHTTPRepository:
             out.append(persisted_url)
         return out
 
+    def get_image_sizes(self, urls: Sequence[str]) -> list[int | None]:
+        out: list[int | None] = []
+        cache: dict[str, int | None] = {}
+        for raw_url in urls:
+            head_url = self._head_url_from_asset_url(raw_url)
+            if head_url is None:
+                out.append(None)
+                continue
+            if head_url not in cache:
+                cache[head_url] = self._head_one(head_url)
+            out.append(cache[head_url])
+        return out
+
     def _extract_unique_image_names(self, urls: Sequence[str]) -> list[str]:
         out: list[str] = []
         seen: set[str] = set()
@@ -109,10 +122,14 @@ class StorageHTTPRepository:
             image_name = clean_path.removeprefix("/api/images/")
         elif clean_path.startswith("/images/"):
             image_name = clean_path.removeprefix("/images/")
+        elif clean_path.startswith("/images-permanent/"):
+            image_name = clean_path.removeprefix("/images-permanent/")
         elif clean_path.startswith("/images_permanent/"):
             image_name = clean_path.removeprefix("/images_permanent/")
         elif clean_path.startswith("images/"):
             image_name = clean_path.removeprefix("images/")
+        elif clean_path.startswith("images-permanent/"):
+            image_name = clean_path.removeprefix("images-permanent/")
         elif clean_path.startswith("images_permanent/"):
             image_name = clean_path.removeprefix("images_permanent/")
         else:
@@ -219,10 +236,62 @@ class StorageHTTPRepository:
             LOGGER.warning(message)
             return fallback_url
 
+    def _head_url_from_asset_url(self, url: str) -> str | None:
+        token = str(url).strip()
+        if not token:
+            return None
+        image_name = self._image_name_from_url(token)
+        if image_name is None:
+            return None
+        encoded = quote(image_name, safe="")
+        base_path = "/images-permanent/" if self._is_permanent_path(token) else "/images/"
+        return f"{self._origin}{base_path}{encoded}"
+
+    def _head_one(self, url: str) -> int | None:
+        request = Request(url=url, method="HEAD")
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                status = int(getattr(response, "status", 200))
+                if status != 200:
+                    message = f"Storage HEAD failed for {url}: HTTP {status}"
+                    if self._fail_on_error:
+                        raise RuntimeError(message)
+                    LOGGER.warning(message)
+                    return None
+                raw_length = str((getattr(response, "headers", {}) or {}).get("Content-Length") or "").strip()
+                if not raw_length:
+                    return None
+                try:
+                    parsed = int(raw_length)
+                except ValueError:
+                    return None
+                return parsed if parsed >= 0 else None
+        except HTTPError as exc:
+            if int(exc.code) in {404, 405}:
+                LOGGER.debug("Storage HEAD size unavailable: url=%s status=%s", url, int(exc.code))
+                return None
+            message = f"Storage HEAD failed for {url}: HTTP {exc.code}"
+            if self._fail_on_error:
+                raise RuntimeError(message) from exc
+            LOGGER.warning(message)
+            return None
+        except URLError as exc:
+            message = f"Storage HEAD failed for {url}: {exc}"
+            if self._fail_on_error:
+                raise RuntimeError(message) from exc
+            LOGGER.warning(message)
+            return None
+
     def _is_permanent_path(self, url: str) -> bool:
         token = str(url).strip()
         if not token:
             return False
         parsed = urlparse(token)
         path = parsed.path if parsed.scheme and parsed.netloc else token
-        return path.strip().startswith("/images_permanent/") or path.strip().startswith("images_permanent/")
+        normalized = path.strip()
+        return (
+            normalized.startswith("/images-permanent/")
+            or normalized.startswith("images-permanent/")
+            or normalized.startswith("/images_permanent/")
+            or normalized.startswith("images_permanent/")
+        )

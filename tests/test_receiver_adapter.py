@@ -34,6 +34,9 @@ def _create_schema(conn: sqlite3.Connection, *, include_artifact_parser_name: bo
             temporarily_closed INTEGER,
             longitude REAL,
             latitude REAL,
+            rating REAL,
+            reviews_count INTEGER,
+            open_date TEXT,
             dataclass_validated INTEGER,
             dataclass_validation_error TEXT,
             ingested_at TEXT
@@ -281,20 +284,20 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                         schedule_weekdays_open_from, schedule_weekdays_closed_from,
                         schedule_saturday_open_from, schedule_saturday_closed_from,
                         schedule_sunday_open_from, schedule_sunday_closed_from,
-                        temporarily_closed, longitude, latitude,
+                        temporarily_closed, longitude, latitude, rating, reviews_count, open_date,
                         dataclass_validated, dataclass_validation_error,
                         ingested_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         11,
                         "run-2",
                         "output_json",
                         "fixprice",
-                        "store",
-                        "FP-11",
-                        "Тестовый адрес",
+                        None,
+                        "HD87",
+                        "Москва, Саянская ул, Дом 11Б",
                         "08:00",
                         "22:00",
                         "09:00",
@@ -302,8 +305,11 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
                         "10:00",
                         "20:00",
                         0,
-                        37.6173,
-                        55.7558,
+                        37.83372708,
+                        55.76833314,
+                        3.4,
+                        None,
+                        "2022-03-28",
                         1,
                         None,
                         "2026-02-27T12:00:00+00:00",
@@ -430,7 +436,10 @@ class ReceiverSQLiteRepositoryTests(unittest.TestCase):
             self.assertIn("receiver_product_categories", all_rows[0].payload)
             self.assertIn("receiver_product_images", all_rows[0].payload)
             self.assertEqual(all_rows[0].payload["receiver_parser_name"], "fixprice")
-            self.assertEqual(all_rows[0].payload["receiver_artifact"]["code"], "FP-11")
+            self.assertEqual(all_rows[0].payload["receiver_artifact"]["code"], "HD87")
+            self.assertAlmostEqual(all_rows[0].payload["receiver_artifact"]["rating"] or 0.0, 3.4, places=3)
+            self.assertIsNone(all_rows[0].payload["receiver_artifact"]["reviews_count"])
+            self.assertEqual(all_rows[0].payload["receiver_artifact"]["open_date"], "2022-03-28")
             self.assertEqual(all_rows[0].payload["receiver_admin_unit"]["id"], 1)
             self.assertEqual(all_rows[0].payload["receiver_categories"][0]["id"], 1)
             self.assertEqual(len(all_rows[0].payload["receiver_product_meta"]), 1)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
@@ -17,9 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import UserDefinedType
 
 
 def _utc_now() -> datetime:
@@ -68,36 +67,11 @@ def _uuid_text() -> String:
     return String(36).with_variant(UUID(as_uuid=False), "postgresql")
 
 
-class _GeographyPointType(UserDefinedType):
-    cache_ok = True
-
-    def get_col_spec(self, **_kw: object) -> str:
-        return "TEXT"
-
-
-@compiles(_GeographyPointType, "postgresql")
-def _compile_geography_point_postgresql(_type, _compiler, **_kw: object) -> str:
-    return "GEOGRAPHY(POINT,4326)"
-
-
-@compiles(_GeographyPointType, "sqlite")
-def _compile_geography_point_sqlite(_type, _compiler, **_kw: object) -> str:
-    return "TEXT"
-
-
 _STORAGE_DELETE_STATUS_ENUM = Enum(
     "pending",
     "done",
     "failed",
     name="catalog_storage_delete_status_enum",
-    native_enum=True,
-)
-
-_PRODUCT_ASSET_KIND_ENUM = Enum(
-    "image_url",
-    "duplicate_image_url",
-    "image_fingerprint",
-    name="catalog_product_asset_kind_enum",
     native_enum=True,
 )
 
@@ -226,18 +200,9 @@ class _CatalogSettlement(_CatalogBase):
     alias: Mapped[str | None] = mapped_column(String(255), nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
-    geo_point: Mapped[str | None] = mapped_column(_GeographyPointType(), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-    __table_args__ = (
-        Index(
-            "ix_catalog_settlements_geo_point_gist",
-            "geo_point",
-            postgresql_using="gist",
-        ),
-    )
 
 
 class _CatalogStore(_CatalogBase):
@@ -259,6 +224,9 @@ class _CatalogStore(_CatalogBase):
     temporarily_closed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reviews_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     settlement_id: Mapped[int | None] = mapped_column(
         _bigint_sqlite(),
         ForeignKey("catalog_settlements.id", ondelete="SET NULL"),
@@ -324,16 +292,15 @@ class _CatalogProductAsset(_CatalogBase):
 
     id: Mapped[int] = mapped_column(_bigint_sqlite(), primary_key=True, autoincrement=True)
     product_id: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False, index=True)
-    asset_kind: Mapped[str] = mapped_column(_PRODUCT_ASSET_KIND_ENUM, nullable=False)
     sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
-    value: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    size: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         UniqueConstraint(
             "product_id",
-            "asset_kind",
             "sort_order",
             name="uq_catalog_product_assets_slot",
         ),

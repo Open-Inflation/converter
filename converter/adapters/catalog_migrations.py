@@ -138,6 +138,9 @@ class _CatalogSchemaMigrationMixin:
             "temporarily_closed",
             "longitude",
             "latitude",
+            "rating",
+            "reviews_count",
+            "open_date",
             "settlement_id",
             "first_seen_at",
             "last_seen_at",
@@ -196,13 +199,28 @@ class _CatalogSchemaMigrationMixin:
             raise RuntimeError(
                 "Schema mismatch: missing table `catalog_product_assets`. Use current schema."
             )
-
-        if inspector.has_table("catalog_settlements"):
-            settlement_columns = {item["name"] for item in inspector.get_columns("catalog_settlements")}
-            if "geo_point" not in settlement_columns:
-                raise RuntimeError(
-                    "Schema mismatch in `catalog_settlements`: missing column geo_point."
-                )
+        asset_columns = {item["name"] for item in inspector.get_columns("catalog_product_assets")}
+        required_asset_columns = (
+            "id",
+            "product_id",
+            "sort_order",
+            "url",
+            "size",
+            "created_at",
+            "updated_at",
+        )
+        missing_asset_columns = [name for name in required_asset_columns if name not in asset_columns]
+        if missing_asset_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_assets`: missing columns "
+                f"{', '.join(missing_asset_columns)}. Run SQL migration."
+            )
+        legacy_asset_columns = [name for name in ("asset_kind", "value") if name in asset_columns]
+        if legacy_asset_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_assets`: legacy columns are not allowed "
+                f"({', '.join(legacy_asset_columns)}). Run SQL migration."
+            )
 
         if self._engine.dialect.name == "postgresql":
             self._ensure_postgresql_types(inspector=inspector)
@@ -276,10 +294,7 @@ class _CatalogSchemaMigrationMixin:
             ("catalog_product_sources", "canonical_product_id", ("UUID",)),
             ("catalog_identity_map", "canonical_product_id", ("UUID",)),
             ("catalog_storage_delete_outbox", "status", ("ENUM",)),
-            ("catalog_product_assets", "asset_kind", ("ENUM",)),
-            # SQLAlchemy often introspects PostGIS geography columns as NullType (token "NULL")
-            # without extra type plugins, so we treat it as acceptable here.
-            ("catalog_settlements", "geo_point", ("GEOGRAPHY", "USER-DEFINED", "NULL")),
+            ("catalog_stores", "open_date", ("DATE",)),
         )
         problems: list[str] = []
         for table_name, column_name, expected_tokens in checks:

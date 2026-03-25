@@ -131,6 +131,7 @@ class NormalizedProductRecord:
     composition_normalized: str | None = None
 
     image_urls: list[str] = field(default_factory=list)
+    image_sizes: list[int | None] = field(default_factory=list)
     duplicate_image_urls: list[str] = field(default_factory=list)
     image_fingerprints: list[str] = field(default_factory=list)
 

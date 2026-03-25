@@ -8,9 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.schema import CreateTable
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
+from converter.adapters.catalog_schema import _CatalogStore
 from converter.core.models import NormalizedProductRecord, RawProductRecord, SyncChunkV2
 from converter.core.ports import StorageRepository
 
@@ -19,6 +22,8 @@ class _FakeStorageRepository(StorageRepository):
     def __init__(self) -> None:
         self.deleted_batches: list[list[str]] = []
         self.persisted_batches: list[list[str]] = []
+        self.size_batches: list[list[str]] = []
+        self.size_map: dict[str, int | None] = {}
 
     def persist_images(self, urls) -> list[str]:  # type: ignore[override]
         batch = list(urls)
@@ -27,10 +32,15 @@ class _FakeStorageRepository(StorageRepository):
         for url in batch:
             token = str(url)
             if "/images/" in token:
-                out.append(token.replace("/images/", "/images_permanent/"))
+                out.append(token.replace("/images/", "/images-permanent/"))
             else:
                 out.append(token)
         return out
+
+    def get_image_sizes(self, urls) -> list[int | None]:  # type: ignore[override]
+        batch = [str(url) for url in urls]
+        self.size_batches.append(batch)
+        return [self.size_map.get(url) for url in batch]
 
     def delete_images(self, urls) -> None:  # type: ignore[override]
         self.deleted_batches.append(list(urls))
@@ -75,27 +85,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         return Path(tmp.name)
 
     @staticmethod
-    def _asset_values(
-        conn: sqlite3.Connection,
-        *,
-        table: str,
-        id_column: str,
-        row_id: int,
-        kind: str,
-    ) -> list[str]:
-        rows = conn.execute(
-            f"""
-            SELECT value
-            FROM {table}
-            WHERE {id_column} = ? AND asset_kind = ?
-            ORDER BY sort_order ASC
-            """,
-            (row_id, kind),
-        ).fetchall()
-        return [str(row["value"]) for row in rows]
-
-    @staticmethod
-    def _asset_kinds(
+    def _asset_urls(
         conn: sqlite3.Connection,
         *,
         table: str,
@@ -104,14 +94,37 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
     ) -> list[str]:
         rows = conn.execute(
             f"""
-            SELECT DISTINCT asset_kind
+            SELECT url
             FROM {table}
             WHERE {id_column} = ?
-            ORDER BY asset_kind ASC
+            ORDER BY sort_order ASC
             """,
             (row_id,),
         ).fetchall()
-        return [str(row["asset_kind"]) for row in rows]
+        return [str(row["url"]) for row in rows]
+
+    @staticmethod
+    def _asset_sizes(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        id_column: str,
+        row_id: int,
+    ) -> list[int | None]:
+        rows = conn.execute(
+            f"""
+            SELECT size
+            FROM {table}
+            WHERE {id_column} = ?
+            ORDER BY sort_order ASC
+            """,
+            (row_id,),
+        ).fetchall()
+        out: list[int | None] = []
+        for row in rows:
+            raw = row["size"]
+            out.append(None if raw is None else int(raw))
+        return out
 
     @staticmethod
     def _make_chunk_record(
@@ -166,9 +179,21 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"]): str(row["type"]).upper()
                     for row in conn.execute("PRAGMA table_info(catalog_product_snapshots)").fetchall()
                 }
+                settlement_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_settlements)").fetchall()
+                }
                 store_columns = {
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_stores)").fetchall()
+                }
+                store_types = {
+                    str(row["name"]): str(row["type"]).upper()
+                    for row in conn.execute("PRAGMA table_info(catalog_stores)").fetchall()
+                }
+                asset_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_product_assets)").fetchall()
                 }
                 category_columns = {
                     str(row["name"])
@@ -245,7 +270,18 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("address", store_columns)
                 self.assertIn("longitude", store_columns)
                 self.assertIn("latitude", store_columns)
+                self.assertIn("rating", store_columns)
+                self.assertIn("reviews_count", store_columns)
+                self.assertIn("open_date", store_columns)
                 self.assertIn("settlement_id", store_columns)
+                self.assertEqual(store_types["open_date"], "DATE")
+                self.assertIn("latitude", settlement_columns)
+                self.assertIn("longitude", settlement_columns)
+                self.assertNotIn("geo_point", settlement_columns)
+                self.assertIn("url", asset_columns)
+                self.assertIn("size", asset_columns)
+                self.assertNotIn("asset_kind", asset_columns)
+                self.assertNotIn("value", asset_columns)
                 self.assertIn("adult", category_columns)
                 self.assertIn("icon", category_columns)
                 self.assertIn("banner", category_columns)
@@ -268,6 +304,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 conn.close()
         finally:
             db_path.unlink(missing_ok=True)
+
+    def test_catalog_store_open_date_uses_postgresql_date_type(self) -> None:
+        ddl = str(CreateTable(_CatalogStore.__table__).compile(dialect=postgresql.dialect()))
+        self.assertIn("open_date DATE", ddl)
 
     def test_schema_validation_rejects_legacy_snapshot_schema(self) -> None:
         db_path = self._make_db()
@@ -395,14 +435,13 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             payload = {
                 "receiver_product_id": 501,
                 "receiver_artifact_id": 701,
-                "receiver_source": "api",
                 "receiver_artifact": {
-                    "source": "api",
-                    "retail_type": "offline",
-                    "code": "store-701",
-                    "address": "Невский пр., 1",
-                    "longitude": 30.31413,
-                    "latitude": 59.93863,
+                    "code": "HD87",
+                    "address": "Москва, Саянская ул, Дом 11Б",
+                    "longitude": 37.83372708,
+                    "latitude": 55.76833314,
+                    "rating": 3.4,
+                    "open_date": "2022-03-28",
                 },
                 "receiver_product": {
                     "price": 199.9,
@@ -458,12 +497,11 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertAlmostEqual(float(product["dimension_width_m"]), 0.31, places=6)
                 self.assertAlmostEqual(float(product["dimension_depth_m"]), 0.41, places=6)
                 self.assertEqual(
-                    self._asset_values(
+                    self._asset_urls(
                         conn,
                         table="catalog_product_assets",
                         id_column="product_id",
                         row_id=int(product["id"]),
-                        kind="image_url",
                     ),
                     [],
                 )
@@ -499,7 +537,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIn("2026-02-28", str(snapshot["valid_to_at"]))
                 store = conn.execute(
                     """
-                    SELECT source, retail_type, code, address, settlement_id
+                    SELECT source, retail_type, code, address, rating, reviews_count, open_date, settlement_id
                     FROM catalog_stores
                     WHERE id = ?
                     """,
@@ -507,15 +545,71 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(store)
                 assert store is not None
-                self.assertEqual(store["source"], "api")
-                self.assertEqual(store["retail_type"], "offline")
-                self.assertEqual(store["code"], "store-701")
-                self.assertEqual(store["address"], "Невский пр., 1")
+                self.assertIsNone(store["source"])
+                self.assertIsNone(store["retail_type"])
+                self.assertEqual(store["code"], "HD87")
+                self.assertEqual(store["address"], "Москва, Саянская ул, Дом 11Б")
+                self.assertAlmostEqual(float(store["rating"]), 3.4, places=3)
+                self.assertIsNone(store["reviews_count"])
+                self.assertEqual(store["open_date"], "2022-03-28")
                 self.assertIsNone(store["settlement_id"])
                 snapshot_payload_table = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'catalog_snapshot_payload_nodes'"
                 ).fetchone()
                 self.assertIsNone(snapshot_payload_table)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_ignores_non_date_store_open_date_text(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed_at = datetime(2026, 3, 25, tzinfo=timezone.utc)
+            record = NormalizedProductRecord(
+                parser_name="chizhik",
+                title_original="Тест",
+                title_normalized="тест",
+                title_original_no_stopwords="тест",
+                title_normalized_no_stopwords="тест",
+                brand=None,
+                unit="PCE",
+                available_count=None,
+                package_quantity=None,
+                package_unit=None,
+                source_id="receiver:run-open-date:1",
+                observed_at=observed_at,
+                source_payload={
+                    "receiver_artifact_id": 26504,
+                    "receiver_artifact": {
+                        "code": "HD87",
+                        "address": "Москва, Саянская ул, Дом 11Б",
+                        "longitude": 37.83372708,
+                        "latitude": 55.76833314,
+                        "rating": 0.0,
+                        "open_date": "Скоро открытие!",
+                    },
+                },
+            )
+
+            repo.upsert_many([record])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                store = conn.execute(
+                    """
+                    SELECT code, rating, open_date
+                    FROM catalog_stores
+                    WHERE parser_name = ? AND code = ?
+                    """,
+                    ("chizhik", "HD87"),
+                ).fetchone()
+                self.assertIsNotNone(store)
+                assert store is not None
+                self.assertAlmostEqual(float(store["rating"]), 0.0, places=3)
+                self.assertIsNone(store["open_date"])
             finally:
                 conn.close()
         finally:
@@ -1165,7 +1259,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT id, name, region, country, latitude, longitude, geo_point FROM catalog_settlements"
+                    "SELECT id, name, region, country, latitude, longitude FROM catalog_settlements"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
                 self.assertEqual(settlement["name"], "Санкт-Петербург")
@@ -1173,7 +1267,6 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(settlement["country"], "RUS")
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
-                self.assertIsNotNone(settlement["geo_point"])
                 store = conn.execute(
                     "SELECT settlement_id FROM catalog_stores ORDER BY id ASC LIMIT 1"
                 ).fetchone()
@@ -1289,13 +1382,12 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT latitude, longitude, geo_point FROM catalog_settlements ORDER BY id DESC LIMIT 1"
+                    "SELECT latitude, longitude FROM catalog_settlements ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
                 assert settlement is not None
                 self.assertAlmostEqual(float(settlement["latitude"]), 59.93863, places=5)
                 self.assertAlmostEqual(float(settlement["longitude"]), 30.31413, places=5)
-                self.assertIsNotNone(settlement["geo_point"])
             finally:
                 conn.close()
         finally:
@@ -1333,13 +1425,12 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 settlement = conn.execute(
-                    "SELECT latitude, longitude, geo_point FROM catalog_settlements ORDER BY id DESC LIMIT 1"
+                    "SELECT latitude, longitude FROM catalog_settlements ORDER BY id DESC LIMIT 1"
                 ).fetchone()
                 self.assertIsNotNone(settlement)
                 assert settlement is not None
                 self.assertIsNone(settlement["latitude"])
                 self.assertIsNone(settlement["longitude"])
-                self.assertIsNone(settlement["geo_point"])
             finally:
                 conn.close()
         finally:
@@ -1415,6 +1506,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         db_path = self._make_db()
         try:
             storage = _FakeStorageRepository()
+            storage.size_map["http://storage.local/images-permanent/dup.webp"] = 321
             repo = CatalogSQLiteRepository(db_path, storage_repository=storage)
 
             record = NormalizedProductRecord(
@@ -1451,7 +1543,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             self.assertEqual(outbox_result["processed"], 1)
             self.assertEqual(outbox_result["deleted"], 1)
             self.assertEqual(outbox_result["failed"], 0)
-            self.assertEqual(storage.deleted_batches, [["http://storage.local/images_permanent/dup.webp"]])
+            self.assertEqual(storage.deleted_batches, [["http://storage.local/images-permanent/dup.webp"]])
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             try:
@@ -1466,13 +1558,22 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(product_row)
                 assert product_row is not None
                 self.assertEqual(
-                    self._asset_kinds(
+                    self._asset_urls(
                         conn,
                         table="catalog_product_assets",
                         id_column="product_id",
                         row_id=int(product_row["id"]),
                     ),
-                    ["image_url"],
+                    ["http://storage.local/images-permanent/dup.webp"],
+                )
+                self.assertEqual(
+                    self._asset_sizes(
+                        conn,
+                        table="catalog_product_assets",
+                        id_column="product_id",
+                        row_id=int(product_row["id"]),
+                    ),
+                    [321],
                 )
             finally:
                 conn.close()
@@ -1547,12 +1648,11 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(row["composition_original"], "Сталь")
                 self.assertEqual(row["composition_normalized"], "сталь")
                 self.assertEqual(
-                    self._asset_values(
+                    self._asset_urls(
                         conn,
                         table="catalog_product_assets",
                         id_column="product_id",
                         row_id=int(row["id"]),
-                        kind="image_url",
                     ),
                     ["https://cdn.example/spoons.jpg"],
                 )

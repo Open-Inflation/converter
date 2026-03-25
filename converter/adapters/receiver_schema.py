@@ -41,6 +41,9 @@ class _RunArtifact(_ReceiverBase):
     temporarily_closed: Mapped[bool | None] = mapped_column(nullable=True)
     longitude: Mapped[float | None] = mapped_column(nullable=True)
     latitude: Mapped[float | None] = mapped_column(nullable=True)
+    rating: Mapped[float | None] = mapped_column(nullable=True)
+    reviews_count: Mapped[int | None] = mapped_column(nullable=True)
+    open_date: Mapped[str | None] = mapped_column(String(32), nullable=True)
     dataclass_validated: Mapped[bool | None] = mapped_column(nullable=True)
     dataclass_validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     ingested_at: Mapped[datetime | str | None] = mapped_column(

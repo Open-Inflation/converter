@@ -6,7 +6,7 @@ import json
 import logging
 from time import sleep
 from time import monotonic
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -110,7 +110,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             storage_repository or self._build_storage_repository_from_env()
         )
         self._category_text_normalizer = RussianTextNormalizer()
-        self._ensure_database_extensions()
         _CatalogBase.metadata.create_all(self._engine)
         if validate_schema:
             self._validate_catalog_products_schema()
@@ -119,12 +118,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             self._engine.dialect.name,
             self._storage_repository is not None,
         )
-
-    def _ensure_database_extensions(self) -> None:
-        if self._engine.dialect.name != "postgresql":
-            return
-        with self._engine.begin() as connection:
-            connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
 
     def upsert_many(self, records: list[NormalizedProductRecord]) -> None:
         if not records:
@@ -1127,6 +1120,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
         duplicates_to_delete = list(dict.fromkeys(duplicate_urls))
         record.image_urls = unique_urls
+        self._populate_record_image_sizes(record)
         record.duplicate_image_urls = []
         record.image_fingerprints = fingerprints
         LOGGER.debug(
@@ -1172,6 +1166,37 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             normalized.append(token)
         if normalized:
             record.image_urls = normalized
+
+    def _populate_record_image_sizes(self, record: NormalizedProductRecord) -> None:
+        record.image_sizes = [None] * len(record.image_urls)
+        storage = self._storage_repository
+        if storage is None or not record.image_urls:
+            return
+
+        size_handler = getattr(storage, "get_image_sizes", None)
+        if not callable(size_handler):
+            return
+
+        try:
+            raw_sizes = size_handler(list(record.image_urls))
+        except Exception as exc:
+            LOGGER.warning(
+                "Catalog image size fetch failed (best effort): parser=%s source_id=%s error=%s",
+                record.parser_name,
+                self._source_id(record),
+                exc,
+            )
+            return
+
+        if not isinstance(raw_sizes, list):
+            return
+
+        normalized_sizes: list[int | None] = []
+        for idx, _ in enumerate(record.image_urls):
+            raw = raw_sizes[idx] if idx < len(raw_sizes) else None
+            parsed = self._to_int(raw)
+            normalized_sizes.append(parsed if parsed is not None and parsed >= 0 else None)
+        record.image_sizes = normalized_sizes
 
     @staticmethod
     def _get_image_fingerprint_row(
@@ -1475,6 +1500,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 temporarily_closed=self._to_bool(data.get("temporarily_closed")),
                 longitude=_as_float(data.get("longitude")),
                 latitude=_as_float(data.get("latitude")),
+                rating=_as_float(data.get("rating")),
+                reviews_count=self._to_int(data.get("reviews_count")),
+                open_date=self._to_date(data.get("open_date")),
                 settlement_id=settlement_id,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
@@ -1526,6 +1554,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             row.longitude = _as_float(data.get("longitude"))
         if _is_missing(row.latitude):
             row.latitude = _as_float(data.get("latitude"))
+        rating = _as_float(data.get("rating"))
+        if not _is_missing(rating):
+            row.rating = rating
+        reviews_count = self._to_int(data.get("reviews_count"))
+        if not _is_missing(reviews_count):
+            row.reviews_count = reviews_count
+        self._fill_missing(row, "open_date", self._to_date(data.get("open_date")))
         self._fill_missing(row, "settlement_id", settlement_id)
         return row
 
@@ -1556,10 +1591,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 settlement_cache[key] = row
 
         if row is None:
-            geo_point = self._to_geo_point(
-                latitude=_as_float(geo.get("latitude")),
-                longitude=_as_float(geo.get("longitude")),
-            )
             row = _CatalogSettlement(
                 geo_key=key,
                 country=geo.get("country"),
@@ -1572,7 +1603,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 alias=geo.get("alias"),
                 latitude=geo.get("latitude"),
                 longitude=geo.get("longitude"),
-                geo_point=geo_point,
                 first_seen_at=observed_at,
                 last_seen_at=observed_at,
                 updated_at=now,
@@ -1603,14 +1633,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self._fill_missing(row, "alias", geo.get("alias"))
         self._fill_missing(row, "latitude", geo.get("latitude"))
         self._fill_missing(row, "longitude", geo.get("longitude"))
-        self._fill_missing(
-            row,
-            "geo_point",
-            self._to_geo_point(
-                latitude=_as_float(geo.get("latitude")),
-                longitude=_as_float(geo.get("longitude")),
-            ),
-        )
 
         LOGGER.debug(
             "Catalog settlement updated: parser=%s source_id=%s settlement_id=%s geo_key=%s",
@@ -1764,6 +1786,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             "temporarily_closed": artifact_data.get("temporarily_closed"),
             "longitude": longitude,
             "latitude": latitude,
+            "rating": _as_float(artifact_data.get("rating")),
+            "reviews_count": self._to_int(artifact_data.get("reviews_count")),
+            "open_date": self._to_date(artifact_data.get("open_date")),
         }
 
     @staticmethod
@@ -1929,14 +1954,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         if lon < -180.0 or lon > 180.0:
             return None
         return round(lat, 8), round(lon, 8)
-
-    @staticmethod
-    def _to_geo_point(*, latitude: float | None, longitude: float | None) -> str | None:
-        normalized = CatalogRepository._normalize_geo_coordinates(latitude, longitude)
-        if normalized is None:
-            return None
-        lat, lon = normalized
-        return f"SRID=4326;POINT({lon:.8f} {lat:.8f})"
 
     def _extract_category_candidates(
         self,
@@ -2180,17 +2197,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         )
 
     @staticmethod
-    def _iter_asset_values(record: NormalizedProductRecord) -> list[tuple[str, list[str]]]:
-        return [
-            ("image_url", list(record.image_urls)),
-        ]
+    def _iter_asset_urls(record: NormalizedProductRecord) -> list[str]:
+        return list(record.image_urls)
 
     @staticmethod
     def _has_any_assets(record: NormalizedProductRecord) -> bool:
-        for _, values in CatalogRepository._iter_asset_values(record):
-            if values:
-                return True
-        return False
+        return bool(CatalogRepository._iter_asset_urls(record))
 
     def _replace_product_assets(
         self,
@@ -2231,18 +2243,18 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         now: datetime,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for asset_kind, values in self._iter_asset_values(record):
-            for idx, value in enumerate(values):
-                rows.append(
-                    {
-                        "product_id": int(product_id),
-                        "asset_kind": asset_kind,
-                        "sort_order": idx,
-                        "value": str(value),
-                        "created_at": now,
-                        "updated_at": now,
-                    }
-                )
+        for idx, url in enumerate(self._iter_asset_urls(record)):
+            size = record.image_sizes[idx] if idx < len(record.image_sizes) else None
+            rows.append(
+                {
+                    "product_id": int(product_id),
+                    "sort_order": idx,
+                    "url": str(url),
+                    "size": size,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
         return rows
 
     @staticmethod
@@ -2313,6 +2325,25 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return None
 
     @staticmethod
+    def _to_date(value: object) -> date | None:
+        if value is None:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        token = _safe_str(value)
+        if token is None:
+            return None
+        try:
+            return date.fromisoformat(token)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(token.replace("Z", "+00:00")).date()
+            except ValueError:
+                return None
+
+    @staticmethod
     def _to_bool(value: object) -> bool | None:
         if value is None:
             return None
@@ -2345,6 +2376,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return value
         if isinstance(value, datetime):
             return cls._to_utc(value).isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
         if isinstance(value, dict):
             out: dict[str, Any] = {}
             for key, item in value.items():

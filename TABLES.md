@@ -4,7 +4,7 @@
 
 - Блок `catalog_*` - целевая БД каталога (создается ORM `converter`).
 - Блок `run_*` / `task_runs` - таблицы БД `receiver`, которые `converter` читает/чистит.
-- В PostgreSQL используются native-типы (`UUID`, `NUMERIC`, `TIMESTAMPTZ`, `ENUM`, `GEOGRAPHY`).
+- В PostgreSQL используются native-типы (`UUID`, `NUMERIC`, `TIMESTAMPTZ`, `ENUM`, `DATE`).
 - В SQLite в тестах используются совместимые fallback-типы.
 
 ## Catalog DB
@@ -15,14 +15,6 @@
 - `pending`
 - `done`
 - `failed`
-
-`catalog_product_asset_kind_enum`:
-- `image_url`
-- `duplicate_image_url`
-- `image_fingerprint`
-
-`converter` в текущем runtime записывает в `catalog_product_assets` только `asset_kind = image_url`.
-Значения `duplicate_image_url` и `image_fingerprint` сохранены в enum для совместимости схемы.
 
 ### `catalog_products`
 
@@ -127,6 +119,9 @@ Constraints/indexes:
 | `temporarily_closed` | `BOOLEAN` | yes | Временное закрытие |
 | `longitude` | `FLOAT` | yes | Долгота |
 | `latitude` | `FLOAT` | yes | Широта |
+| `rating` | `FLOAT` | yes | Рейтинг магазина |
+| `reviews_count` | `BIGINT` | yes | Кол-во отзывов магазина |
+| `open_date` | `DATE` | yes | Дата открытия магазина, если `receiver_artifact.open_date` удалось распарсить как ISO-дату |
 | `settlement_id` | `BIGINT` | yes | Связь с `catalog_settlements.id` |
 | `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
 | `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
@@ -137,6 +132,9 @@ Constraints/indexes:
 - `UNIQUE(store_key)`
 - FK: `settlement_id -> catalog_settlements.id` (`ON DELETE SET NULL`)
 - Indexes: `parser_name`, `code`, `settlement_id`, `(parser_name, source, code)`
+
+Notes:
+- `converter` не выдумывает дату открытия: строки вроде `Скоро открытие!` не конвертируются и дают `catalog_stores.open_date = NULL`.
 
 ### `catalog_product_sources`
 
@@ -175,7 +173,6 @@ Constraints/indexes:
 | `alias` | `VARCHAR(255)` | yes | Алиас |
 | `latitude` | `FLOAT` | yes | Широта |
 | `longitude` | `FLOAT` | yes | Долгота |
-| `geo_point` | `GEOGRAPHY(POINT,4326)` | yes | PostGIS point |
 | `first_seen_at` | `TIMESTAMPTZ` | no | Первое наблюдение |
 | `last_seen_at` | `TIMESTAMPTZ` | no | Последнее наблюдение |
 | `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
@@ -183,7 +180,6 @@ Constraints/indexes:
 Constraints/indexes:
 - `PK(id)`
 - `UNIQUE(geo_key)`
-- GiST index `ix_catalog_settlements_geo_point_gist` on `geo_point`
 
 ### `catalog_categories`
 
@@ -252,15 +248,15 @@ Constraints/indexes:
 |---|---|---:|---|
 | `id` | `BIGINT` | no | PK, autoincrement |
 | `product_id` | `BIGINT` | no | ID из `catalog_products` |
-| `asset_kind` | `catalog_product_asset_kind_enum` | no | Тип asset (`converter` пишет `image_url`) |
 | `sort_order` | `BIGINT` | no | Позиция в списке |
-| `value` | `TEXT` | no | Значение asset |
+| `url` | `TEXT` | no | URL изображения |
+| `size` | `BIGINT` | yes | Размер файла в байтах из `HEAD Content-Length`, если удалось получить |
 | `created_at` | `TIMESTAMPTZ` | no | Время создания |
 | `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
 
 Constraints/indexes:
 - `PK(id)`
-- `UNIQUE(product_id, asset_kind, sort_order)` (`uq_catalog_product_assets_slot`)
+- `UNIQUE(product_id, sort_order)` (`uq_catalog_product_assets_slot`)
 - Index: `product_id`
 
 ### `catalog_storage_delete_outbox`
@@ -308,6 +304,9 @@ Constraints/indexes:
 | `temporarily_closed` | `BOOLEAN` | yes | Временно закрыт |
 | `longitude` | `FLOAT` | yes | Долгота |
 | `latitude` | `FLOAT` | yes | Широта |
+| `rating` | `FLOAT` | yes | Рейтинг магазина |
+| `reviews_count` | `BIGINT` | yes | Кол-во отзывов магазина |
+| `open_date` | `VARCHAR(32)` | yes | Дата открытия или исходная строка от parser/receiver |
 | `dataclass_validated` | `BOOLEAN` | yes | Флаг dataclass validation |
 | `dataclass_validation_error` | `TEXT` | yes | Ошибка валидации |
 | `ingested_at` | `TIMESTAMPTZ` | yes | Когда артефакт ingested |

@@ -34,5 +34,8 @@ class StorageRepository(Protocol):
     def persist_images(self, urls: Sequence[str]) -> list[str]:
         raise NotImplementedError
 
+    def get_image_sizes(self, urls: Sequence[str]) -> list[int | None]:
+        raise NotImplementedError
+
     def delete_images(self, urls: Sequence[str]) -> None:
         raise NotImplementedError

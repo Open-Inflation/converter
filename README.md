@@ -50,9 +50,10 @@ converter/
   плюс event-контракт (`source_event_uid`, `content_fingerprint`, `valid_from_at/valid_to_at`, `observed_at`, `created_at`).
 - `catalog_product_sources` - состояние источника `(parser_name, source_id)` и ссылка на последний snapshot.
 - `catalog_settlements` - справочник населенных пунктов/регионов/стран.
+- `catalog_stores` - справочник магазинов из `receiver_artifact`, включая `rating`, `reviews_count`, `open_date`.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent + adult/icon/banner).
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
-- `catalog_product_assets` - массивные поля текущей проекции товара (image urls, duplicates, fingerprints) в нормализованном виде.
+- `catalog_product_assets` - текущие image assets товара (`url`, `size`, `sort_order`) в нормализованном виде.
 
 Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
@@ -62,6 +63,10 @@ Converter сохраняет расширенный product-контракт в 
 а snapshot-историю ведет через единую таблицу `catalog_product_snapshots`.
 Legacy snapshot-схема не поддерживается: миграция one-way удаляет устаревшие snapshot-таблицы и лишние snapshot-поля.
 Автоматической миграции в `CatalogRepository` больше нет: запуск migration выполняется вручную отдельной командой.
+Для добавленных store-полей в существующую PostgreSQL БД нужна миграция
+`sql/migrations/20260325_catalog_store_metadata_postgresql.sql`.
+Для нового контракта image assets в существующую PostgreSQL БД нужна миграция
+`sql/migrations/20260325_catalog_product_assets_url_size_postgresql.sql`.
 
 Целевая production-СУБД: PostgreSQL (`postgresql+psycopg://...`).
 SQLite оставлен только для локальных тестов/фикстур.
@@ -112,6 +117,8 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 - `converter.adapters.ReceiverSQLiteRepository`
 - поддерживает только актуальную схему `receiver` (`run_artifacts.parser_name` обязателен).
+- store metadata из `run_artifacts` (`rating`, `reviews_count`, `open_date`) переносится в `catalog_stores`.
+- `receiver_artifact.open_date` конвертируется в `catalog_stores.open_date` только если это реальная ISO-дата; значения вроде `Скоро открытие!` не домысливаются и сохраняются как `NULL`.
 - если обязательной колонки нет, адаптер падает с ошибкой несовместимой схемы.
 
 Есть sink под SQLite-базу `catalog`:
@@ -154,8 +161,9 @@ python3 sync_receiver_to_catalog.py \
 - `CONVERTER_STORAGE_DELETE_TIMEOUT_SEC` — timeout `DELETE` запроса (по умолчанию `10`).
 - ошибка удаления больше не прерывает `apply_chunk`, обработка идет через retry в outbox worker.
 - перед dedup конвертер вызывает `POST /api/images/{image_name}/persist` (best effort) и сохраняет новый `Location` URL.
+- для заполнения `catalog_product_assets.size` конвертер делает `HEAD` на публичный image URL и читает стандартный `Content-Length`.
 
-Удаление выполняется только для URL текущего storage origin и путей `/images/<name>` / `/images_permanent/<name>`.
+Удаление и HEAD-size lookup выполняются только для URL текущего storage origin и путей `/images/<name>` / `/images-permanent/<name>`.
 
 ### Демон (polling)
 
