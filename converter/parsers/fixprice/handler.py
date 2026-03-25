@@ -75,6 +75,7 @@ _DIMENSION_SYMBOL_TO_AXIS = {
     "d": "depth",
     "l": "depth",
 }
+_PLACEHOLDER_BRANDS = {"no name"}
 
 
 def _safe_str(value: object) -> str | None:
@@ -82,6 +83,13 @@ def _safe_str(value: object) -> str | None:
         return None
     token = str(value).strip()
     return token or None
+
+
+def _is_placeholder_brand(value: str | None) -> bool:
+    token = _safe_str(value)
+    if token is None:
+        return False
+    return token.casefold() in _PLACEHOLDER_BRANDS
 
 
 def _normalize_unit(unit: str | None) -> str | None:
@@ -347,6 +355,9 @@ class FixPriceHandler(BaseParserHandler):
     def handle(self, raw: RawProductRecord) -> NormalizedProductRecord:
         normalized = super().handle(raw)
         brand = normalized.brand.strip() if isinstance(normalized.brand, str) else ""
+        if _is_placeholder_brand(brand):
+            normalized.brand = None
+            brand = ""
         if brand and (DIM_CM_RE.search(brand) or DIM_GENERIC_RE.search(brand) or WVL_RE.search(brand)):
             normalized.brand = None
 

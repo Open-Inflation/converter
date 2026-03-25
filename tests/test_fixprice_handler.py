@@ -85,6 +85,27 @@ class FixPriceHandlerTests(unittest.TestCase):
         normalized = self.handler.handle(raw)
         self.assertIsNone(normalized.brand)
 
+    def test_handle_drops_fixprice_placeholder_brand(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Мармелад жевательный, 48 г",
+            brand="No name",
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertIsNone(normalized.brand)
+
+    def test_handle_populates_brand_normalized_as_lowercase(self) -> None:
+        raw = RawProductRecord(
+            parser_name="fixprice",
+            title="Набор мисок",
+            brand="O'Kitchen",
+        )
+
+        normalized = self.handler.handle(raw)
+        self.assertEqual(normalized.brand, "O'Kitchen")
+        self.assertEqual(normalized.brand_normalized, "o'kitchen")
+
     def test_handle_extracts_dimensions_from_meta_sequence_with_order_hint(self) -> None:
         raw = RawProductRecord(
             parser_name="fixprice",

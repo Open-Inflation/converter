@@ -53,11 +53,16 @@ converter/
 - `catalog_stores` - справочник магазинов из `receiver_artifact`, включая `rating`, `reviews_count`, `open_date`.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent + adult/icon/banner).
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
-- `catalog_product_assets` - текущие image assets товара (`url`, `size`, `sort_order`) в нормализованном виде.
+- `catalog_product_groups` - связи "товар -> группа одинаковых товаров"; `converter` пишет туда `source=converter`, а `group_uid` сейчас совпадает с вычисленным `canonical_product_id`.
+- `catalog_product_assets` - текущие image assets товара (`url`, `size`, `fingerprint`, `sort_order`) в нормализованном виде.
+
+`catalog_settlements` теперь мерджится между источниками: если совпадают `name_normalized` и `settlement_type`, а `region_normalized` и `country_normalized` совпадают или отсутствуют у одной из сторон, `converter` дополняет существующую запись вместо создания дубля.
 
 Для title в БД хранится единое поле `title_normalized_no_stopwords`; поля
 `title_normalized` и `title_original_no_stopwords` в `catalog_products` и
 `catalog_product_snapshots` не сохраняются.
+Для бренда в `catalog_products` хранятся оба поля: исходный `brand` и
+`brand_normalized`, где нормализация сейчас намеренно простая: `strip().lower()`.
 
 Converter сохраняет расширенный product-контракт в `catalog_products` (current projection),
 а snapshot-историю ведет через единую таблицу `catalog_product_snapshots`.
@@ -67,6 +72,12 @@ Legacy snapshot-схема не поддерживается: миграция o
 `sql/migrations/20260325_catalog_store_metadata_postgresql.sql`.
 Для нового контракта image assets в существующую PostgreSQL БД нужна миграция
 `sql/migrations/20260325_catalog_product_assets_url_size_postgresql.sql`.
+После неё для объединения fingerprint registry с asset-таблицей нужна миграция
+`sql/migrations/20260325_catalog_product_assets_merge_fingerprints_postgresql.sql`.
+Для таблицы групп одинаковых товаров в существующую PostgreSQL БД нужна миграция
+`sql/migrations/20260325_catalog_product_groups_postgresql.sql`.
+Для поля `catalog_products.brand_normalized` в существующую PostgreSQL БД нужна миграция
+`sql/migrations/20260325_catalog_product_brand_normalized_postgresql.sql`.
 
 Целевая production-СУБД: PostgreSQL (`postgresql+psycopg://...`).
 SQLite оставлен только для локальных тестов/фикстур.
@@ -91,6 +102,7 @@ SQLite оставлен только для локальных тестов/фи
 - `title_normalized_no_stopwords`
 - `unit`, `available_count`, `package_quantity`, `package_unit`
 - `dimension_height_m`, `dimension_width_m`, `dimension_depth_m` (в метрах)
+- placeholder-бренд `No name` из Fix Price гасится в `NULL`, а не сохраняется как реальный бренд
 
 Unit guide:
 
@@ -125,7 +137,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 - `converter.adapters.CatalogSQLiteRepository`
 - выполняет `upsert` нормализованных товаров;
-- хранит persistent `canonical_product_id` map и image fingerprints.
+- хранит persistent `canonical_product_id` map; fingerprint изображений теперь лежит прямо в `catalog_product_assets`.
 
 Полный sync `receiver -> catalog` (SQLite):
 
@@ -160,7 +172,7 @@ python3 sync_receiver_to_catalog.py \
 - `CONVERTER_STORAGE_API_TOKEN` (или `STORAGE_API_TOKEN`) — токен `Bearer`.
 - `CONVERTER_STORAGE_DELETE_TIMEOUT_SEC` — timeout `DELETE` запроса (по умолчанию `10`).
 - ошибка удаления больше не прерывает `apply_chunk`, обработка идет через retry в outbox worker.
-- перед dedup конвертер вызывает `POST /api/images/{image_name}/persist` (best effort) и сохраняет новый `Location` URL.
+- перед dedup конвертер вызывает `POST /api/images/{image_name}/persist?overwrite=true` (best effort) и сохраняет новый `Location` URL.
 - для заполнения `catalog_product_assets.size` конвертер делает `HEAD` на публичный image URL и читает стандартный `Content-Length`.
 
 Удаление и HEAD-size lookup выполняются только для URL текущего storage origin и путей `/images/<name>` / `/images-permanent/<name>`.

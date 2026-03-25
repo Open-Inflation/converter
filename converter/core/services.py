@@ -95,6 +95,7 @@ class NullBackfillService:
 
     DEFAULT_FIELDS = (
         "brand",
+        "brand_normalized",
         "category_normalized",
         "geo_normalized",
         "composition_original",

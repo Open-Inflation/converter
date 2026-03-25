@@ -92,6 +92,7 @@ class _CatalogProduct(_CatalogBase):
     title_normalized_no_stopwords: Mapped[str] = mapped_column(Text, nullable=False)
 
     brand: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    brand_normalized: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     source_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -278,13 +279,24 @@ class _CatalogIdentityMap(_CatalogBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class _CatalogImageFingerprint(_CatalogBase):
-    __tablename__ = "catalog_image_fingerprints"
+class _CatalogProductGroup(_CatalogBase):
+    __tablename__ = "catalog_product_groups"
 
-    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
-    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    group_uid: Mapped[str] = mapped_column(_uuid_text(), primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        _bigint_sqlite(),
+        ForeignKey("catalog_products.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source: Mapped[str] = mapped_column(String(64), primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_catalog_product_groups_product_id",
+            "product_id",
+        ),
+    )
 
 
 class _CatalogProductAsset(_CatalogBase):
@@ -295,6 +307,7 @@ class _CatalogProductAsset(_CatalogBase):
     sort_order: Mapped[int] = mapped_column(_bigint_sqlite(), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     size: Mapped[int | None] = mapped_column(_bigint_sqlite(), nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -325,8 +338,8 @@ __all__ = [
     "_CatalogBase",
     "_CatalogCategory",
     "_CatalogIdentityMap",
-    "_CatalogImageFingerprint",
     "_CatalogProduct",
+    "_CatalogProductGroup",
     "_CatalogProductAsset",
     "_CatalogProductSnapshot",
     "_CatalogProductSource",

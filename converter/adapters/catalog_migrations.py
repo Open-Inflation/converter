@@ -51,6 +51,7 @@ class _CatalogSchemaMigrationMixin:
         required_product_columns = (
             "primary_category_id",
             "settlement_id",
+            "brand_normalized",
             "composition_original",
             "package_weight_gross",
             "package_count",
@@ -206,6 +207,7 @@ class _CatalogSchemaMigrationMixin:
             "sort_order",
             "url",
             "size",
+            "fingerprint",
             "created_at",
             "updated_at",
         )
@@ -220,6 +222,31 @@ class _CatalogSchemaMigrationMixin:
             raise RuntimeError(
                 "Schema mismatch in `catalog_product_assets`: legacy columns are not allowed "
                 f"({', '.join(legacy_asset_columns)}). Run SQL migration."
+            )
+        if inspector.has_table("catalog_image_fingerprints"):
+            raise RuntimeError(
+                "Schema mismatch: legacy table `catalog_image_fingerprints` is not allowed. "
+                "Merge fingerprints into `catalog_product_assets` via current SQL migration."
+            )
+
+        if not inspector.has_table("catalog_product_groups"):
+            raise RuntimeError(
+                "Schema mismatch: missing table `catalog_product_groups`. Run SQL migration."
+            )
+        product_group_columns = {item["name"] for item in inspector.get_columns("catalog_product_groups")}
+        required_product_group_columns = (
+            "group_uid",
+            "product_id",
+            "source",
+            "created_at",
+        )
+        missing_product_group_columns = [
+            name for name in required_product_group_columns if name not in product_group_columns
+        ]
+        if missing_product_group_columns:
+            raise RuntimeError(
+                "Schema mismatch in `catalog_product_groups`: missing columns "
+                f"{', '.join(missing_product_group_columns)}. Run SQL migration."
             )
 
         if self._engine.dialect.name == "postgresql":
@@ -293,6 +320,7 @@ class _CatalogSchemaMigrationMixin:
             ("catalog_products", "canonical_product_id", ("UUID",)),
             ("catalog_product_sources", "canonical_product_id", ("UUID",)),
             ("catalog_identity_map", "canonical_product_id", ("UUID",)),
+            ("catalog_product_groups", "group_uid", ("UUID",)),
             ("catalog_storage_delete_outbox", "status", ("ENUM",)),
             ("catalog_stores", "open_date", ("DATE",)),
         )

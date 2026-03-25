@@ -32,8 +32,8 @@ from .catalog_schema import (
     _CatalogBase,
     _CatalogCategory,
     _CatalogIdentityMap,
-    _CatalogImageFingerprint,
     _CatalogProduct,
+    _CatalogProductGroup,
     _CatalogProductAsset,
     _CatalogProductSnapshot,
     _CatalogProductSource,
@@ -72,6 +72,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
     BACKFILL_FIELDS = (
         "brand",
+        "brand_normalized",
         "category_normalized",
         "geo_normalized",
         "composition_original",
@@ -88,6 +89,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
     _TXN_RETRY_ATTEMPTS = 5
     _TXN_RETRY_BASE_DELAY_SEC = 0.2
     _TXN_RETRY_MAX_DELAY_SEC = 2.0
+    _PRODUCT_GROUP_SOURCE = "converter"
 
     def __init__(
         self,
@@ -391,6 +393,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         session.info["_catalog_store_cache"] = store_cache
 
         settlement_keys_set: set[str] = set()
+        settlement_match_keys_set: set[tuple[str, str]] = set()
         for item in prepared_records:
             geo = self._extract_geo_components(item.record, payload=item.payload)
             if geo is None:
@@ -398,6 +401,9 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             key = self._geo_key(geo)
             if key is not None:
                 settlement_keys_set.add(key)
+            match_key = self._settlement_match_key(geo)
+            if match_key is not None:
+                settlement_match_keys_set.add(match_key)
         settlement_keys = sorted(settlement_keys_set)
         settlement_cache: dict[str, _CatalogSettlement | None] = {key: None for key in settlement_keys}
         if settlement_keys:
@@ -407,6 +413,25 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             for row in settlement_rows:
                 settlement_cache[row.geo_key] = row
         session.info["_catalog_settlement_cache"] = settlement_cache
+        settlement_match_keys = sorted(settlement_match_keys_set)
+        settlement_candidate_cache: dict[tuple[str, str], list[_CatalogSettlement]] = {
+            key: [] for key in settlement_match_keys
+        }
+        if settlement_match_keys:
+            settlement_candidate_rows = session.scalars(
+                select(_CatalogSettlement).where(
+                    tuple_(
+                        _CatalogSettlement.name_normalized,
+                        _CatalogSettlement.settlement_type,
+                    ).in_(settlement_match_keys)
+                )
+            ).all()
+            for row in settlement_candidate_rows:
+                match_key = self._settlement_match_key_from_row(row)
+                if match_key is None:
+                    continue
+                settlement_candidate_cache.setdefault(match_key, []).append(row)
+        session.info["_catalog_settlement_candidate_cache"] = settlement_candidate_cache
 
         category_keys: set[str] = set()
         for item in prepared_records:
@@ -528,6 +553,37 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         cached = session.info.get("_catalog_product_cache")
         if isinstance(cached, dict):
             cached[(parser_name, source_id)] = row
+
+    @staticmethod
+    def _get_cached_product_group_row(
+        session: Session,
+        *,
+        group_uid: str,
+        product_id: int,
+        source: str,
+    ) -> _CatalogProductGroup | None:
+        key = (group_uid, product_id, source)
+        cached = session.info.setdefault("_catalog_product_group_cache", {})
+        if isinstance(cached, dict) and key in cached:
+            value = cached[key]
+            return value if isinstance(value, _CatalogProductGroup) else None
+        row = session.get(_CatalogProductGroup, key)
+        if isinstance(cached, dict):
+            cached[key] = row
+        return row
+
+    @staticmethod
+    def _cache_product_group_row(
+        session: Session,
+        *,
+        group_uid: str,
+        product_id: int,
+        source: str,
+        row: _CatalogProductGroup | None,
+    ) -> None:
+        cached = session.info.setdefault("_catalog_product_group_cache", {})
+        if isinstance(cached, dict):
+            cached[(group_uid, product_id, source)] = row
 
     @staticmethod
     def _get_cached_snapshot_by_id(
@@ -1085,7 +1141,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         fingerprints: list[str] = []
 
         seen_in_record: set[str] = set()
-        now = _utc_now()
 
         for raw_url in record.image_urls:
             url = raw_url.strip()
@@ -1093,29 +1148,12 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 continue
 
             fingerprint = hashlib.sha256(url.encode("utf-8")).hexdigest()
-            row = self._get_image_fingerprint_row(session, fingerprint)
-
-            if row is None:
-                canonical_url = url
-                row = _CatalogImageFingerprint(
-                    fingerprint=fingerprint,
-                    canonical_url=canonical_url,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(row)
-            else:
-                canonical_url = row.canonical_url
-                row.updated_at = now
-                if canonical_url != url:
-                    duplicate_urls.append(url)
-
             if fingerprint in seen_in_record:
                 duplicate_urls.append(url)
                 continue
 
             seen_in_record.add(fingerprint)
-            unique_urls.append(canonical_url)
+            unique_urls.append(url)
             fingerprints.append(fingerprint)
 
         duplicates_to_delete = list(dict.fromkeys(duplicate_urls))
@@ -1197,18 +1235,6 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             parsed = self._to_int(raw)
             normalized_sizes.append(parsed if parsed is not None and parsed >= 0 else None)
         record.image_sizes = normalized_sizes
-
-    @staticmethod
-    def _get_image_fingerprint_row(
-        session: Session,
-        fingerprint: str,
-    ) -> _CatalogImageFingerprint | None:
-        for pending in session.new:
-            if not isinstance(pending, _CatalogImageFingerprint):
-                continue
-            if pending.fingerprint == fingerprint:
-                return pending
-        return session.get(_CatalogImageFingerprint, fingerprint)
 
     def _enqueue_duplicate_images(self, session: Session, duplicate_urls: list[str]) -> None:
         if not duplicate_urls:
@@ -1589,6 +1615,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             row = self._get_settlement_row(session, key)
             if isinstance(settlement_cache, dict):
                 settlement_cache[key] = row
+        if row is None:
+            row = self._find_compatible_settlement_row(session, geo)
+            if isinstance(settlement_cache, dict):
+                settlement_cache[key] = row
 
         if row is None:
             row = _CatalogSettlement(
@@ -1611,6 +1641,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             session.flush([row])
             if isinstance(settlement_cache, dict):
                 settlement_cache[key] = row
+            self._cache_settlement_candidate_row(session, row=row)
             LOGGER.debug(
                 "Catalog settlement created: parser=%s source_id=%s settlement_id=%s geo_key=%s",
                 record.parser_name,
@@ -1633,6 +1664,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         self._fill_missing(row, "alias", geo.get("alias"))
         self._fill_missing(row, "latitude", geo.get("latitude"))
         self._fill_missing(row, "longitude", geo.get("longitude"))
+        self._cache_settlement_candidate_row(session, row=row)
 
         LOGGER.debug(
             "Catalog settlement updated: parser=%s source_id=%s settlement_id=%s geo_key=%s",
@@ -1997,6 +2029,123 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         return session.scalar(select(_CatalogSettlement).where(_CatalogSettlement.geo_key == geo_key))
 
     @staticmethod
+    def _settlement_match_key(geo: dict[str, object]) -> tuple[str, str] | None:
+        name = _safe_str(geo.get("name_normalized"))
+        settlement_type = _safe_str(geo.get("settlement_type"))
+        if name is None or settlement_type is None:
+            return None
+        return name, settlement_type.strip().lower()
+
+    @staticmethod
+    def _settlement_match_key_from_row(row: _CatalogSettlement) -> tuple[str, str] | None:
+        name = _safe_str(row.name_normalized)
+        settlement_type = _safe_str(row.settlement_type)
+        if name is None or settlement_type is None:
+            return None
+        return name, settlement_type.strip().lower()
+
+    @staticmethod
+    def _compatible_settlement_value(left: str | None, right: str | None) -> bool:
+        left_token = _safe_str(left)
+        right_token = _safe_str(right)
+        if left_token is None or right_token is None:
+            return True
+        return left_token == right_token
+
+    @classmethod
+    def _is_settlement_row_compatible(
+        cls,
+        row: _CatalogSettlement,
+        geo: dict[str, object],
+    ) -> bool:
+        row_match_key = cls._settlement_match_key_from_row(row)
+        incoming_match_key = cls._settlement_match_key(geo)
+        if row_match_key is None or incoming_match_key is None or row_match_key != incoming_match_key:
+            return False
+        if not cls._compatible_settlement_value(row.country_normalized, _safe_str(geo.get("country_normalized"))):
+            return False
+        if not cls._compatible_settlement_value(row.region_normalized, _safe_str(geo.get("region_normalized"))):
+            return False
+        return True
+
+    @classmethod
+    def _settlement_match_score(
+        cls,
+        row: _CatalogSettlement,
+        geo: dict[str, object],
+    ) -> tuple[int, int, int, int, int, int]:
+        incoming_country = _safe_str(geo.get("country_normalized"))
+        incoming_region = _safe_str(geo.get("region_normalized"))
+        row_country = _safe_str(row.country_normalized)
+        row_region = _safe_str(row.region_normalized)
+        row_id = int(row.id) if row.id is not None else 0
+        return (
+            1 if row_country is not None and incoming_country is not None and row_country == incoming_country else 0,
+            1 if row_region is not None and incoming_region is not None and row_region == incoming_region else 0,
+            1 if row_country is not None else 0,
+            1 if row_region is not None else 0,
+            1 if row.latitude is not None and row.longitude is not None else 0,
+            -row_id,
+        )
+
+    def _find_compatible_settlement_row(
+        self,
+        session: Session,
+        geo: dict[str, object],
+    ) -> _CatalogSettlement | None:
+        match_key = self._settlement_match_key(geo)
+        if match_key is None:
+            return None
+
+        candidate_cache = session.info.setdefault("_catalog_settlement_candidate_cache", {})
+        candidates: list[_CatalogSettlement]
+        if isinstance(candidate_cache, dict) and match_key in candidate_cache:
+            cached = candidate_cache.get(match_key)
+            candidates = [row for row in cached if isinstance(row, _CatalogSettlement)] if isinstance(cached, list) else []
+        else:
+            candidates = session.scalars(
+                select(_CatalogSettlement).where(
+                    _CatalogSettlement.name_normalized == match_key[0],
+                    _CatalogSettlement.settlement_type == match_key[1],
+                )
+            ).all()
+            if isinstance(candidate_cache, dict):
+                candidate_cache[match_key] = list(candidates)
+
+        compatible = [row for row in candidates if self._is_settlement_row_compatible(row, geo)]
+        if not compatible:
+            return None
+        return max(compatible, key=lambda row: self._settlement_match_score(row, geo))
+
+    @staticmethod
+    def _cache_settlement_candidate_row(
+        session: Session,
+        *,
+        row: _CatalogSettlement,
+    ) -> None:
+        match_key = CatalogRepository._settlement_match_key_from_row(row)
+        if match_key is None:
+            return
+        candidate_cache = session.info.setdefault("_catalog_settlement_candidate_cache", {})
+        if not isinstance(candidate_cache, dict):
+            return
+        bucket = candidate_cache.setdefault(match_key, [])
+        if not isinstance(bucket, list):
+            candidate_cache[match_key] = [row]
+            return
+        for existing in bucket:
+            if isinstance(existing, _CatalogSettlement) and existing is row:
+                return
+            if (
+                isinstance(existing, _CatalogSettlement)
+                and existing.id is not None
+                and row.id is not None
+                and int(existing.id) == int(row.id)
+            ):
+                return
+        bucket.append(row)
+
+    @staticmethod
     def _get_store_row(session: Session, store_key: str) -> _CatalogStore | None:
         for pending in session.new:
             if not isinstance(pending, _CatalogStore):
@@ -2019,7 +2168,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         country = _safe_str(geo.get("country_normalized")) or ""
         region = _safe_str(geo.get("region_normalized")) or ""
         name = _safe_str(geo.get("name_normalized")) or ""
-        combined = "|".join((country, region, name)).strip("|")
+        settlement_type = _safe_str(geo.get("settlement_type")) or ""
+        combined = "|".join((country, region, name, settlement_type)).strip("|")
         return combined or None
 
     @staticmethod
@@ -2051,6 +2201,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         primary_category_id = self._primary_category_id(categories)
         settlement_id = int(settlement.id) if settlement is not None and settlement.id is not None else None
         parser_name = record.parser_name
+        brand_normalized = self._normalized_brand_value(record.brand_normalized, record.brand)
 
         existing = self._get_cached_product_row(
             session,
@@ -2070,6 +2221,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
                 title_original=record.title_original,
                 title_normalized_no_stopwords=record.title_normalized_no_stopwords,
                 brand=record.brand,
+                brand_normalized=brand_normalized,
                 source_page_url=record.source_page_url,
                 description=record.description,
                 producer_name=record.producer_name,
@@ -2107,6 +2259,7 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             )
             if existing.id is not None and self._has_any_assets(record):
                 self._replace_product_assets(session, int(existing.id), record, now=now)
+            self._ensure_product_group_membership(session, product=existing)
             LOGGER.debug(
                 "Catalog product created: parser=%s source_id=%s product_id=%s canonical_product_id=%s",
                 record.parser_name,
@@ -2131,6 +2284,8 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
 
         if not _is_missing(record.brand):
             existing.brand = record.brand
+        if not _is_missing(brand_normalized):
+            existing.brand_normalized = brand_normalized
         if not _is_missing(record.source_page_url):
             existing.source_page_url = record.source_page_url
         if not _is_missing(record.description):
@@ -2188,12 +2343,53 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             self._replace_product_assets(session, int(existing.id), record, now=now)
 
         existing.observed_at = self._max_datetime(existing.observed_at, self._to_utc(record.observed_at))
+        self._ensure_product_group_membership(session, product=existing)
         LOGGER.debug(
             "Catalog product updated: parser=%s source_id=%s product_id=%s canonical_product_id=%s",
             record.parser_name,
             source_id,
             existing.id,
             existing.canonical_product_id,
+        )
+
+    def _ensure_product_group_membership(
+        self,
+        session: Session,
+        *,
+        product: _CatalogProduct,
+    ) -> None:
+        group_uid = _safe_str(product.canonical_product_id)
+        source = self._PRODUCT_GROUP_SOURCE
+        if group_uid is None:
+            return
+        if product.id is None:
+            session.flush([product])
+        if product.id is None:
+            return
+
+        product_id = int(product.id)
+        existing = self._get_cached_product_group_row(
+            session,
+            group_uid=group_uid,
+            product_id=product_id,
+            source=source,
+        )
+        if existing is not None:
+            return
+
+        row = _CatalogProductGroup(
+            group_uid=group_uid,
+            product_id=product_id,
+            source=source,
+            created_at=self._to_utc(product.created_at),
+        )
+        session.add(row)
+        self._cache_product_group_row(
+            session,
+            group_uid=group_uid,
+            product_id=product_id,
+            source=source,
+            row=row,
         )
 
     @staticmethod
@@ -2245,12 +2441,14 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         rows: list[dict[str, Any]] = []
         for idx, url in enumerate(self._iter_asset_urls(record)):
             size = record.image_sizes[idx] if idx < len(record.image_sizes) else None
+            fingerprint = record.image_fingerprints[idx] if idx < len(record.image_fingerprints) else None
             rows.append(
                 {
                     "product_id": int(product_id),
                     "sort_order": idx,
                     "url": str(url),
                     "size": size,
+                    "fingerprint": fingerprint,
                     "created_at": now,
                     "updated_at": now,
                 }
@@ -2271,6 +2469,15 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         current = getattr(target, field_name)
         if _is_missing(current):
             setattr(target, field_name, value)
+
+    @staticmethod
+    def _normalized_brand_value(brand_normalized: object, brand: object) -> str | None:
+        source = brand if not _is_missing(brand) else brand_normalized
+        token = _safe_str(source)
+        if token is None:
+            return None
+        lowered = token.lower()
+        return lowered or None
 
     @staticmethod
     def _normalize_text(value: str | None) -> str | None:

@@ -179,7 +179,7 @@ class StorageHTTPRepository:
 
     def _persist_one(self, *, image_name: str, fallback_url: str) -> str:
         encoded = quote(image_name, safe="")
-        url = f"{self._base_url}/api/images/{encoded}/persist"
+        url = f"{self._base_url}/api/images/{encoded}/persist?overwrite=true"
         request = Request(
             url=url,
             method="POST",

@@ -20,12 +20,13 @@ class _DeleteHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self.server.paths.append(self.path)
         self.server.auth_headers.append((self.headers.get("Authorization") or "").strip())
+        path_only = self.path.split("?", 1)[0]
         if self.path.startswith("/api/images/missing.webp/persist"):
             self.send_response(HTTPStatus.NOT_FOUND)
             self.end_headers()
             return
-        if self.path.startswith("/api/images/") and self.path.endswith("/persist"):
-            image_name = self.path.removeprefix("/api/images/").removesuffix("/persist")
+        if self.path.startswith("/api/images/") and path_only.endswith("/persist"):
+            image_name = path_only.removeprefix("/api/images/").removesuffix("/persist")
             self.send_response(HTTPStatus.SEE_OTHER)
             self.send_header("Location", f"/images-permanent/{image_name}")
             self.end_headers()
@@ -128,7 +129,7 @@ class StorageHTTPRepositoryTests(unittest.TestCase):
                     "https://example.org/remote.webp",
                 ],
             )
-            self.assertEqual(server.paths, ["/api/images/a.webp/persist"])
+            self.assertEqual(server.paths, ["/api/images/a.webp/persist?overwrite=true"])
         finally:
             server.shutdown()
             thread.join(timeout=2.0)

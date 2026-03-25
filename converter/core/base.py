@@ -64,6 +64,7 @@ class BaseParserHandler(ABC):
             source_id=raw.source_id,
             plu=raw.plu,
             sku=raw.sku,
+            brand_normalized=self.normalize_brand(brand),
             category_normalized=self.normalize_category(raw.category),
             geo_normalized=self.normalize_geo(raw.geo),
             composition_original=self._raw_string(raw.composition),
@@ -79,6 +80,13 @@ class BaseParserHandler(ABC):
 
     def normalize_category(self, category: str | None) -> str | None:
         return self._normalize_string(category)
+
+    def normalize_brand(self, brand: str | None) -> str | None:
+        raw = self._raw_string(brand)
+        if raw is None:
+            return None
+        lowered = raw.lower()
+        return lowered or None
 
     def normalize_geo(self, geo: str | None) -> str | None:
         return self._normalize_string(geo)

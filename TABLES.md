@@ -31,6 +31,7 @@
 | `title_original` | `TEXT` | no | Оригинальный title |
 | `title_normalized_no_stopwords` | `TEXT` | no | Нормализованный title без stop-слов |
 | `brand` | `VARCHAR(255)` | yes | Бренд |
+| `brand_normalized` | `VARCHAR(255)` | yes | Бренд в lower-case (`strip().lower()`) |
 | `source_page_url` | `TEXT` | yes | URL карточки |
 | `description` | `TEXT` | yes | Описание |
 | `producer_name` | `VARCHAR(255)` | yes | Производитель |
@@ -155,6 +156,23 @@ Constraints/indexes:
 - `PK(parser_name, source_id)`
 - Index: `canonical_product_id`
 
+### `catalog_product_groups`
+
+Связи "товар -> группа одинаковых товаров". Для записей, которые создаёт `converter`,
+`group_uid` совпадает с вычисленным `canonical_product_id`, а `source` равен `converter`.
+
+| Column | Type (PostgreSQL) | Null | Notes |
+|---|---|---:|---|
+| `group_uid` | `UUID` | no | UID группы одинаковых товаров |
+| `product_id` | `BIGINT` | no | ID товара из `catalog_products.id` |
+| `source` | `VARCHAR(64)` | no | Источник записи о группировке |
+| `created_at` | `TIMESTAMPTZ` | no | Когда связь была создана |
+
+Constraints/indexes:
+- `PK(group_uid, product_id, source)`
+- FK: `product_id -> catalog_products.id` (`ON DELETE CASCADE`)
+- Index: `product_id`
+
 ### `catalog_settlements`
 
 Справочник населенных пунктов и региональной географии.
@@ -180,6 +198,9 @@ Constraints/indexes:
 Constraints/indexes:
 - `PK(id)`
 - `UNIQUE(geo_key)`
+
+Notes:
+- `converter` может переиспользовать одну и ту же запись settlement между разными источниками, если совпадают `name_normalized` и `settlement_type`, а `region_normalized` и `country_normalized` совпадают или отсутствуют у одной из сторон.
 
 ### `catalog_categories`
 
@@ -226,20 +247,6 @@ Constraints/indexes:
 - `PK(parser_name, identity_type, identity_value)`
 - Index: `canonical_product_id`
 
-### `catalog_image_fingerprints`
-
-Persistent дедуп изображений.
-
-| Column | Type (PostgreSQL) | Null | Notes |
-|---|---|---:|---|
-| `fingerprint` | `VARCHAR(64)` | no | PK, hash изображения/URL |
-| `canonical_url` | `TEXT` | no | Канонический URL |
-| `created_at` | `TIMESTAMPTZ` | no | Время создания |
-| `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
-
-Constraints/indexes:
-- `PK(fingerprint)`
-
 ### `catalog_product_assets`
 
 Нормализованные ассеты current-state товара.
@@ -251,13 +258,14 @@ Constraints/indexes:
 | `sort_order` | `BIGINT` | no | Позиция в списке |
 | `url` | `TEXT` | no | URL изображения |
 | `size` | `BIGINT` | yes | Размер файла в байтах из `HEAD Content-Length`, если удалось получить |
+| `fingerprint` | `VARCHAR(64)` | yes | SHA-256 от URL изображения; объединяет прежний registry `catalog_image_fingerprints` с asset-строками |
 | `created_at` | `TIMESTAMPTZ` | no | Время создания |
 | `updated_at` | `TIMESTAMPTZ` | no | Время обновления |
 
 Constraints/indexes:
 - `PK(id)`
 - `UNIQUE(product_id, sort_order)` (`uq_catalog_product_assets_slot`)
-- Index: `product_id`
+- Indexes: `product_id`, `fingerprint`
 
 ### `catalog_storage_delete_outbox`
 

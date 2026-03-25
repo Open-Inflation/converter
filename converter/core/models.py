@@ -121,6 +121,7 @@ class NormalizedProductRecord:
     plu: str | None = None
     sku: str | None = None
     canonical_product_id: str | None = None
+    brand_normalized: str | None = None
 
     category_normalized: str | None = None
 

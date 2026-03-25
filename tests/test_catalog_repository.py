@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.schema import CreateTable
 
 from converter import CatalogSQLiteRepository, build_default_pipeline
-from converter.adapters.catalog_schema import _CatalogStore
+from converter.adapters.catalog_schema import _CatalogProductGroup, _CatalogStore
 from converter.core.models import NormalizedProductRecord, RawProductRecord, SyncChunkV2
 from converter.core.ports import StorageRepository
 
@@ -195,6 +195,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_product_assets)").fetchall()
                 }
+                product_group_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(catalog_product_groups)").fetchall()
+                }
                 category_columns = {
                     str(row["name"])
                     for row in conn.execute("PRAGMA table_info(catalog_categories)").fetchall()
@@ -202,6 +206,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
                 self.assertIn("title_original", product_columns)
                 self.assertIn("title_normalized_no_stopwords", product_columns)
+                self.assertIn("brand_normalized", product_columns)
                 self.assertIn("composition_original", product_columns)
                 self.assertIn("dimension_height_m", product_columns)
                 self.assertIn("dimension_width_m", product_columns)
@@ -280,8 +285,13 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertNotIn("geo_point", settlement_columns)
                 self.assertIn("url", asset_columns)
                 self.assertIn("size", asset_columns)
+                self.assertIn("fingerprint", asset_columns)
                 self.assertNotIn("asset_kind", asset_columns)
                 self.assertNotIn("value", asset_columns)
+                self.assertIn("group_uid", product_group_columns)
+                self.assertIn("product_id", product_group_columns)
+                self.assertIn("source", product_group_columns)
+                self.assertIn("created_at", product_group_columns)
                 self.assertIn("adult", category_columns)
                 self.assertIn("icon", category_columns)
                 self.assertIn("banner", category_columns)
@@ -293,8 +303,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ).fetchall()
                 }
                 self.assertIn("catalog_product_assets", tables)
+                self.assertIn("catalog_product_groups", tables)
                 self.assertIn("catalog_product_snapshots", tables)
                 self.assertIn("catalog_stores", tables)
+                self.assertNotIn("catalog_image_fingerprints", tables)
                 self.assertNotIn("catalog_snapshot_events", tables)
                 self.assertNotIn("catalog_snapshot_available_counts", tables)
                 self.assertNotIn("catalog_snapshot_assets", tables)
@@ -308,6 +320,10 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
     def test_catalog_store_open_date_uses_postgresql_date_type(self) -> None:
         ddl = str(CreateTable(_CatalogStore.__table__).compile(dialect=postgresql.dialect()))
         self.assertIn("open_date DATE", ddl)
+
+    def test_catalog_product_groups_use_postgresql_uuid_type(self) -> None:
+        ddl = str(CreateTable(_CatalogProductGroup.__table__).compile(dialect=postgresql.dialect()))
+        self.assertIn("group_uid UUID", ddl)
 
     def test_schema_validation_rejects_legacy_snapshot_schema(self) -> None:
         db_path = self._make_db()
@@ -739,15 +755,37 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 ).fetchone()
                 self.assertIsNotNone(identity)
 
-                image_rows = conn.execute("SELECT fingerprint, canonical_url FROM catalog_image_fingerprints").fetchall()
-                self.assertEqual(len(image_rows), 1)
-                self.assertEqual(image_rows[0]["canonical_url"], "https://cdn.example/choco-main.jpg")
+                image_rows = conn.execute(
+                    """
+                    SELECT fingerprint, url
+                    FROM catalog_product_assets
+                    ORDER BY product_id ASC, sort_order ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(image_rows), 2)
+                self.assertEqual(
+                    {str(row["url"]) for row in image_rows},
+                    {"https://cdn.example/choco-main.jpg"},
+                )
+                self.assertEqual(len({str(row["fingerprint"]) for row in image_rows}), 1)
 
                 snapshots = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_product_snapshots").fetchone()
                 self.assertEqual(int(snapshots["cnt"]), 2)
 
                 source_rows = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_product_sources").fetchone()
                 self.assertEqual(int(source_rows["cnt"]), 2)
+
+                group_rows = conn.execute(
+                    """
+                    SELECT group_uid, product_id, source
+                    FROM catalog_product_groups
+                    ORDER BY product_id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(group_rows), 2)
+                self.assertEqual({str(row["source"]) for row in group_rows}, {"converter"})
+                self.assertEqual(len({str(row["group_uid"]) for row in group_rows}), 1)
+                self.assertEqual(str(group_rows[0]["group_uid"]), str(rows[0]["canonical_product_id"]))
 
                 categories = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_categories").fetchone()
                 self.assertGreaterEqual(int(categories["cnt"]), 1)
@@ -1026,6 +1064,15 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                     ("fixprice", "receiver:run-stable:1"),
                 ).fetchall()
                 self.assertEqual(len(snapshots), 1)
+
+                product_groups = conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM catalog_product_groups
+                    """
+                ).fetchone()
+                assert product_groups is not None
+                self.assertEqual(int(product_groups["cnt"]), 1)
                 self.assertIsNotNone(snapshots[0]["content_fingerprint"])
                 self.assertIn("2026-02-28 10:00:00", str(snapshots[0]["valid_from_at"]))
                 self.assertIn("2026-02-28 11:00:00", str(snapshots[0]["valid_to_at"]))
@@ -1100,7 +1147,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
 
                 product = conn.execute(
                     """
-                    SELECT brand, description
+                    SELECT brand, brand_normalized, description
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -1109,6 +1156,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(product)
                 assert product is not None
                 self.assertEqual(product["brand"], "Brand-2")
+                self.assertEqual(product["brand_normalized"], "brand-2")
                 self.assertEqual(product["description"], "Описание 2")
             finally:
                 conn.close()
@@ -1502,6 +1550,213 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
         finally:
             db_path.unlink(missing_ok=True)
 
+    def test_upsert_merges_settlements_across_sources_when_region_is_missing_on_one_side(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            first = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-settlement-merge:1",
+                sku="settlement-merge-1",
+                title="Товар 1",
+                observed_at=datetime(2026, 2, 10, 10, 0, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-merge",
+                    "receiver_artifact_id": 1001,
+                    "receiver_product_id": 1,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_settlement_type": "city",
+                    "receiver_geo_latitude": 59.93863,
+                    "receiver_geo_longitude": 30.31413,
+                },
+            )
+            second = RawProductRecord(
+                parser_name="chizhik",
+                source_id="receiver:run-settlement-merge:2",
+                sku="settlement-merge-2",
+                title="Товар 2",
+                observed_at=datetime(2026, 2, 10, 10, 5, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-merge",
+                    "receiver_artifact_id": 1002,
+                    "receiver_product_id": 2,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": None,
+                    "receiver_geo_name": "Санкт-Петербург",
+                    "receiver_geo_settlement_type": "city",
+                },
+            )
+
+            repo.upsert_many([pipeline.process_one(first)])
+            repo.upsert_many([pipeline.process_one(second)])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                settlements = conn.execute(
+                    """
+                    SELECT id, country, region, name, settlement_type
+                    FROM catalog_settlements
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(settlements), 1)
+                self.assertEqual(settlements[0]["country"], "RUS")
+                self.assertEqual(settlements[0]["region"], "Ленинградская область")
+                self.assertEqual(settlements[0]["name"], "Санкт-Петербург")
+                self.assertEqual(settlements[0]["settlement_type"], "city")
+
+                linked = conn.execute(
+                    """
+                    SELECT settlement_id
+                    FROM catalog_products
+                    WHERE source_id IN (?, ?)
+                    ORDER BY source_id ASC
+                    """,
+                    ("receiver:run-settlement-merge:1", "receiver:run-settlement-merge:2"),
+                ).fetchall()
+                self.assertEqual(len(linked), 2)
+                self.assertEqual(int(linked[0]["settlement_id"]), int(settlements[0]["id"]))
+                self.assertEqual(int(linked[1]["settlement_id"]), int(settlements[0]["id"]))
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_does_not_merge_settlements_when_regions_conflict(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            first = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-settlement-conflict:1",
+                sku="settlement-conflict-1",
+                title="Товар 1",
+                observed_at=datetime(2026, 2, 10, 11, 0, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-conflict",
+                    "receiver_artifact_id": 1101,
+                    "receiver_product_id": 1,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Тверская область",
+                    "receiver_geo_name": "Озерки",
+                    "receiver_geo_settlement_type": "village",
+                },
+            )
+            second = RawProductRecord(
+                parser_name="chizhik",
+                source_id="receiver:run-settlement-conflict:2",
+                sku="settlement-conflict-2",
+                title="Товар 2",
+                observed_at=datetime(2026, 2, 10, 11, 5, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-conflict",
+                    "receiver_artifact_id": 1102,
+                    "receiver_product_id": 2,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Озерки",
+                    "receiver_geo_settlement_type": "village",
+                },
+            )
+
+            repo.upsert_many([pipeline.process_one(first)])
+            repo.upsert_many([pipeline.process_one(second)])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                settlements = conn.execute(
+                    """
+                    SELECT id, region, name, settlement_type
+                    FROM catalog_settlements
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(settlements), 2)
+                self.assertEqual({str(row["region"]) for row in settlements}, {"Тверская область", "Ленинградская область"})
+
+                linked = conn.execute(
+                    """
+                    SELECT settlement_id
+                    FROM catalog_products
+                    WHERE source_id IN (?, ?)
+                    ORDER BY source_id ASC
+                    """,
+                    ("receiver:run-settlement-conflict:1", "receiver:run-settlement-conflict:2"),
+                ).fetchall()
+                self.assertEqual(len(linked), 2)
+                self.assertNotEqual(int(linked[0]["settlement_id"]), int(linked[1]["settlement_id"]))
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_upsert_does_not_merge_settlements_when_types_differ(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            pipeline = build_default_pipeline()
+
+            first = RawProductRecord(
+                parser_name="fixprice",
+                source_id="receiver:run-settlement-type:1",
+                sku="settlement-type-1",
+                title="Товар 1",
+                observed_at=datetime(2026, 2, 10, 12, 0, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-type",
+                    "receiver_artifact_id": 1201,
+                    "receiver_product_id": 1,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Кировск",
+                    "receiver_geo_settlement_type": "city",
+                },
+            )
+            second = RawProductRecord(
+                parser_name="chizhik",
+                source_id="receiver:run-settlement-type:2",
+                sku="settlement-type-2",
+                title="Товар 2",
+                observed_at=datetime(2026, 2, 10, 12, 5, tzinfo=timezone.utc),
+                payload={
+                    "receiver_run_id": "run-settlement-type",
+                    "receiver_artifact_id": 1202,
+                    "receiver_product_id": 2,
+                    "receiver_geo_country": "RUS",
+                    "receiver_geo_region": "Ленинградская область",
+                    "receiver_geo_name": "Кировск",
+                    "receiver_geo_settlement_type": "village",
+                },
+            )
+
+            repo.upsert_many([pipeline.process_one(first)])
+            repo.upsert_many([pipeline.process_one(second)])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                settlements = conn.execute(
+                    """
+                    SELECT settlement_type
+                    FROM catalog_settlements
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(settlements), 2)
+                self.assertEqual({str(row["settlement_type"]) for row in settlements}, {"city", "village"})
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
     def test_upsert_requests_storage_delete_for_duplicate_images(self) -> None:
         db_path = self._make_db()
         try:
@@ -1593,6 +1848,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 title_original_no_stopwords="набор ложек",
                 title_normalized_no_stopwords="набор ложка",
                 brand="O'Kitchen",
+                brand_normalized="o'kitchen",
                 unit="PCE",
                 available_count=10.0,
                 package_quantity=None,
@@ -1613,6 +1869,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 title_original_no_stopwords="набор ложек",
                 title_normalized_no_stopwords="набор ложка",
                 brand=None,
+                brand_normalized=None,
                 unit="PCE",
                 available_count=None,
                 package_quantity=None,
@@ -1634,7 +1891,14 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
             try:
                 row = conn.execute(
                     """
-                    SELECT id, brand, primary_category_id, settlement_id, composition_original, composition_normalized
+                    SELECT
+                        id,
+                        brand,
+                        brand_normalized,
+                        primary_category_id,
+                        settlement_id,
+                        composition_original,
+                        composition_normalized
                     FROM catalog_products
                     WHERE parser_name = ? AND source_id = ?
                     """,
@@ -1643,6 +1907,7 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertIsNotNone(row)
                 assert row is not None
                 self.assertEqual(row["brand"], "O'Kitchen")
+                self.assertEqual(row["brand_normalized"], "o'kitchen")
                 self.assertIsNotNone(row["primary_category_id"])
                 self.assertIsNotNone(row["settlement_id"])
                 self.assertEqual(row["composition_original"], "Сталь")
