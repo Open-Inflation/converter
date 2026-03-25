@@ -785,10 +785,131 @@ class CatalogSQLiteRepositoryTests(unittest.TestCase):
                 self.assertEqual(len(group_rows), 2)
                 self.assertEqual({str(row["source"]) for row in group_rows}, {"converter"})
                 self.assertEqual(len({str(row["group_uid"]) for row in group_rows}), 1)
-                self.assertEqual(str(group_rows[0]["group_uid"]), str(rows[0]["canonical_product_id"]))
+                self.assertNotEqual(str(group_rows[0]["group_uid"]), str(rows[0]["canonical_product_id"]))
 
                 categories = conn.execute("SELECT COUNT(*) AS cnt FROM catalog_categories").fetchone()
                 self.assertGreaterEqual(int(categories["cnt"]), 1)
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_product_groups_merge_across_parsers_by_normalized_title_and_brand(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
+
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Шоколад молочный",
+                title_normalized="шоколад молочный",
+                title_original_no_stopwords="шоколад молочный",
+                title_normalized_no_stopwords="шоколад молочный",
+                brand="Brand",
+                brand_normalized="brand",
+                unit="PCE",
+                available_count=1.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="fixprice:1",
+                sku="fp-1",
+                observed_at=observed,
+            )
+            second = NormalizedProductRecord(
+                parser_name="chizhik",
+                title_original="Шоколад молочный",
+                title_normalized="шоколад молочный",
+                title_original_no_stopwords="шоколад молочный",
+                title_normalized_no_stopwords="шоколад молочный",
+                brand="Brand",
+                brand_normalized="brand",
+                unit="PCE",
+                available_count=2.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="chizhik:1",
+                sku="ch-1",
+                observed_at=observed,
+            )
+
+            repo.upsert_many([first, second])
+
+            self.assertIsNotNone(first.canonical_product_id)
+            self.assertIsNotNone(second.canonical_product_id)
+            self.assertNotEqual(first.canonical_product_id, second.canonical_product_id)
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                group_rows = conn.execute(
+                    """
+                    SELECT group_uid, product_id, source
+                    FROM catalog_product_groups
+                    ORDER BY product_id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(group_rows), 2)
+                self.assertEqual(len({str(row["group_uid"]) for row in group_rows}), 1)
+                self.assertEqual({str(row["source"]) for row in group_rows}, {"converter"})
+            finally:
+                conn.close()
+        finally:
+            db_path.unlink(missing_ok=True)
+
+    def test_product_groups_do_not_merge_when_normalized_brand_differs(self) -> None:
+        db_path = self._make_db()
+        try:
+            repo = CatalogSQLiteRepository(db_path)
+            observed = datetime(2026, 3, 25, 12, 0, tzinfo=timezone.utc)
+
+            first = NormalizedProductRecord(
+                parser_name="fixprice",
+                title_original="Шоколад молочный",
+                title_normalized="шоколад молочный",
+                title_original_no_stopwords="шоколад молочный",
+                title_normalized_no_stopwords="шоколад молочный",
+                brand="Brand A",
+                brand_normalized="brand a",
+                unit="PCE",
+                available_count=1.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="fixprice:1",
+                sku="fp-1",
+                observed_at=observed,
+            )
+            second = NormalizedProductRecord(
+                parser_name="chizhik",
+                title_original="Шоколад молочный",
+                title_normalized="шоколад молочный",
+                title_original_no_stopwords="шоколад молочный",
+                title_normalized_no_stopwords="шоколад молочный",
+                brand="Brand B",
+                brand_normalized="brand b",
+                unit="PCE",
+                available_count=2.0,
+                package_quantity=None,
+                package_unit=None,
+                source_id="chizhik:1",
+                sku="ch-1",
+                observed_at=observed,
+            )
+
+            repo.upsert_many([first, second])
+
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                group_rows = conn.execute(
+                    """
+                    SELECT group_uid
+                    FROM catalog_product_groups
+                    ORDER BY product_id ASC
+                    """
+                ).fetchall()
+                self.assertEqual(len(group_rows), 2)
+                self.assertEqual(len({str(row["group_uid"]) for row in group_rows}), 2)
             finally:
                 conn.close()
         finally:

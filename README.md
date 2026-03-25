@@ -53,7 +53,7 @@ converter/
 - `catalog_stores` - справочник магазинов из `receiver_artifact`, включая `rating`, `reviews_count`, `open_date`.
 - `catalog_categories` - справочник категорий (uid/title/depth/parent + adult/icon/banner).
 - `catalog_products` - текущая проекция (read-model) для быстрых чтений.
-- `catalog_product_groups` - связи "товар -> группа одинаковых товаров"; `converter` пишет туда `source=converter`, а `group_uid` сейчас совпадает с вычисленным `canonical_product_id`.
+- `catalog_product_groups` - связи "товар -> группа одинаковых товаров"; `converter` пишет туда `source=converter`, а `group_uid` сейчас считается по `title_normalized_no_stopwords + brand_normalized`.
 - `catalog_product_assets` - текущие image assets товара (`url`, `size`, `fingerprint`, `sort_order`) в нормализованном виде.
 
 `catalog_settlements` теперь мерджится между источниками: если совпадают `name_normalized` и `settlement_type`, а `region_normalized` и `country_normalized` совпадают или отсутствуют у одной из сторон, `converter` дополняет существующую запись вместо создания дубля.
@@ -76,6 +76,9 @@ Legacy snapshot-схема не поддерживается: миграция o
 `sql/migrations/20260325_catalog_product_assets_merge_fingerprints_postgresql.sql`.
 Для таблицы групп одинаковых товаров в существующую PostgreSQL БД нужна миграция
 `sql/migrations/20260325_catalog_product_groups_postgresql.sql`.
+Если таблица уже была заполнена старой логикой, для пересборки `group_uid` по
+`title_normalized_no_stopwords + brand_normalized` нужна миграция
+`sql/migrations/20260325_catalog_product_groups_title_brand_postgresql.sql`.
 Для поля `catalog_products.brand_normalized` в существующую PostgreSQL БД нужна миграция
 `sql/migrations/20260325_catalog_product_brand_normalized_postgresql.sql`.
 

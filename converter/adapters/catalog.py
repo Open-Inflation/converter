@@ -2358,7 +2358,10 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
         *,
         product: _CatalogProduct,
     ) -> None:
-        group_uid = _safe_str(product.canonical_product_id)
+        group_uid = self._product_group_uid(
+            title_normalized=product.title_normalized_no_stopwords,
+            brand_normalized=self._normalized_brand_value(product.brand_normalized, product.brand),
+        )
         source = self._PRODUCT_GROUP_SOURCE
         if group_uid is None:
             return
@@ -2368,6 +2371,13 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return
 
         product_id = int(product.id)
+        session.execute(
+            delete(_CatalogProductGroup).where(
+                _CatalogProductGroup.product_id == product_id,
+                _CatalogProductGroup.source == source,
+                _CatalogProductGroup.group_uid != group_uid,
+            )
+        )
         existing = self._get_cached_product_group_row(
             session,
             group_uid=group_uid,
@@ -2478,6 +2488,20 @@ class CatalogRepository(_CatalogSchemaMigrationMixin):
             return None
         lowered = token.lower()
         return lowered or None
+
+    @staticmethod
+    def _stable_uuid_from_seed(seed: str) -> str:
+        digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+        return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+
+    @classmethod
+    def _product_group_uid(cls, *, title_normalized: object, brand_normalized: object) -> str | None:
+        title = _safe_str(title_normalized)
+        if title is None:
+            return None
+        brand = _safe_str(brand_normalized) or ""
+        seed = f"product-group|title={title}|brand={brand}"
+        return cls._stable_uuid_from_seed(seed)
 
     @staticmethod
     def _normalize_text(value: str | None) -> str | None:

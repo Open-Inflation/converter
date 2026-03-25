@@ -159,7 +159,8 @@ Constraints/indexes:
 ### `catalog_product_groups`
 
 Связи "товар -> группа одинаковых товаров". Для записей, которые создаёт `converter`,
-`group_uid` совпадает с вычисленным `canonical_product_id`, а `source` равен `converter`.
+`group_uid` считается детерминированно по паре
+`title_normalized_no_stopwords + brand_normalized`, а `source` равен `converter`.
 
 | Column | Type (PostgreSQL) | Null | Notes |
 |---|---|---:|---|
